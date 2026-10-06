@@ -1,0 +1,17 @@
+[package]
+name = "tokers-gui"
+description = "Native TikTok client UI (gpui)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tokers"
+path = "src/main.rs"
+
+[dependencies]
+tokers.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+tokio.workspace = true

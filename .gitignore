@@ -1,0 +1,5 @@
+/target
+/tmp
+.env
+proxy.txt
+*.capture.json
