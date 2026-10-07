@@ -29,7 +29,7 @@ impl Default for TransportConfig {
     fn default() -> Self {
         TransportConfig {
             timeout: Duration::from_secs(20),
-            min_interval: Duration::from_secs(3),
+            min_interval: Duration::from_secs(1),
             emulation: Profile::Chrome120,
         }
     }
@@ -42,10 +42,15 @@ pub enum Pace {
     Free,
     /// Starts at least `min_interval` after the egress's last start.
     Queued,
-    /// Paced the same, but ahead of every queued request: something the user is
-    /// waiting on right now (the comments they opened), not a prefetch.
+    /// Goes at once, past the queue (and without holding it up): something the user is
+    /// waiting on right now (the comments they opened), not a prefetch. Only other urgent
+    /// requests space it, by [`URGENT_GAP`]. Measured on comment/list: back to back and
+    /// eight at once, no more empty answers than at 3 s apart.
     Urgent,
 }
+
+/// The least gap between two urgent requests on one egress.
+pub const URGENT_GAP: Duration = Duration::from_millis(250);
 
 impl From<bool> for Pace {
     fn from(throttle: bool) -> Self {
@@ -53,12 +58,11 @@ impl From<bool> for Pace {
     }
 }
 
-/// Pacing of one egress.
+/// Pacing of one egress: the last start of a queued request and of an urgent one.
 #[derive(Default)]
 struct Lane {
-    last: Option<Instant>,
-    /// Urgent requests waiting: queued ones hold back while there are any.
-    urgent: usize,
+    queued: Option<Instant>,
+    urgent: Option<Instant>,
 }
 
 /// One keep-alive client per egress, shared by every caller.
@@ -89,44 +93,29 @@ impl Transport {
         *self.min_interval.lock().unwrap() = interval;
     }
 
-    /// Wait for this request's start slot: starts on one egress are `min_interval`
-    /// apart, across all tasks; an [`Pace::Urgent`] request takes the next slot ahead of
-    /// queued ones. Returns how long it waited.
+    /// Wait for this request's start slot: queued starts on one egress are `min_interval`
+    /// apart, across all tasks; urgent ones only [`URGENT_GAP`] apart from each other.
+    /// Returns how long it waited.
     pub async fn wait_slot(&self, proxy: Option<&ProxyUrl>, pace: Pace) -> Duration {
-        let began = Instant::now();
         if pace == Pace::Free {
             return Duration::ZERO;
         }
-        let key = proxy.cloned();
-        // counted while waiting, uncounted however the wait ends (a dropped future too)
-        struct Waiting<'a>(&'a Mutex<HashMap<Option<ProxyUrl>, Lane>>, Option<ProxyUrl>);
-        impl Drop for Waiting<'_> {
-            fn drop(&mut self) {
-                if let Some(lane) = self.0.lock().unwrap().get_mut(&self.1) {
-                    lane.urgent = lane.urgent.saturating_sub(1);
-                }
-            }
-        }
-        let _waiting = (pace == Pace::Urgent).then(|| {
-            self.lanes.lock().unwrap().entry(key.clone()).or_default().urgent += 1;
-            Waiting(&self.lanes, key.clone())
-        });
-        loop {
-            let wake = {
-                let gap = *self.min_interval.lock().unwrap();
-                let mut lanes = self.lanes.lock().unwrap();
-                let lane = lanes.entry(key.clone()).or_default();
-                let now = Instant::now();
-                let ready = lane.last.map_or(now, |last| last + gap);
-                if now >= ready && (pace == Pace::Urgent || lane.urgent == 0) {
-                    lane.last = Some(now);
-                    return now - began;
-                }
-                // a queued request behind an urgent one looks again shortly after it went
-                ready.max(now + Duration::from_millis(20))
+        let slot = {
+            let gap = match pace {
+                Pace::Urgent => URGENT_GAP,
+                _ => *self.min_interval.lock().unwrap(),
             };
-            tokio::time::sleep_until(wake).await;
-        }
+            let mut lanes = self.lanes.lock().unwrap();
+            let lane = lanes.entry(proxy.cloned()).or_default();
+            let last = if pace == Pace::Urgent { &mut lane.urgent } else { &mut lane.queued };
+            let now = Instant::now();
+            let slot = last.map_or(now, |last| (last + gap).max(now));
+            *last = Some(slot);
+            slot
+        };
+        let began = Instant::now();
+        tokio::time::sleep_until(slot).await;
+        began.elapsed()
     }
 
     fn client(&self, proxy: Option<&ProxyUrl>) -> Result<wreq::Client> {
