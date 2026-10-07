@@ -88,6 +88,8 @@ const LENS_SHRINK: f32 = 0.18;
 const LENS_JELLY: SpringConfig = SpringConfig::new(650., 12., 1.);
 /// Speed (px/s) at which the drop is stretched by half.
 const LENS_STRETCH_SPEED: f32 = 1600.;
+/// How far the drop necks in at its middle at full speed (share of its width).
+const LENS_WAIST: f32 = 0.38;
 /// A pressed face squeezes in and springs back past its size.
 const SQUISH: Duration = Duration::from_millis(560);
 
@@ -101,6 +103,8 @@ struct Lens {
     pop: Spring,
     wide: Spring,
     tall: Spring,
+    /// How far it necks in at the middle as it pulls from one button to the next.
+    waist: Spring,
     /// Where each face of the current stack was painted, and the stack itself.
     faces: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
     origin: Rc<Cell<Point<Pixels>>>,
@@ -119,6 +123,7 @@ struct Drop {
     size: f32,
     wide: f32,
     tall: f32,
+    waist: f32,
 }
 
 impl Lens {
@@ -129,11 +134,12 @@ impl Lens {
             pop: Spring::new(LENS_POP, 0.),
             wide: Spring::new(LENS_JELLY, 1.),
             tall: Spring::new(LENS_JELLY, 1.),
+            waist: Spring::new(LENS_POP, 0.),
             faces: Rc::default(),
             origin: Rc::default(),
             labels: Rc::default(),
             x: 0.,
-            now: Drop { x: 0., y: 0., size: 0., wide: 1., tall: 1. },
+            now: Drop { x: 0., y: 0., size: 0., wide: 1., tall: 1., waist: 0. },
         }
     }
 
@@ -159,12 +165,15 @@ impl Lens {
         let stretch = 1. + 0.5 * speed;
         self.tall.set(stretch);
         self.wide.set(1. / stretch.sqrt());
+        // and necks in at the middle, as a drop pulling apart does, filling back out as it lands
+        self.waist.set(LENS_WAIST * speed.min(1.));
         self.now = Drop {
             x: self.x,
             y,
             size: self.pop.tick(window, cx).max(0.),
             wide: self.wide.tick(window, cx),
             tall: self.tall.tick(window, cx),
+            waist: self.waist.tick(window, cx).clamp(0., LENS_WAIST),
         };
     }
 
@@ -1152,8 +1161,8 @@ impl FeedView {
                     window.with_subpixel_paint(|window| {
                         // the whole drop fades as it shrinks away, its lens included
                         window.with_opacity(drop.size.min(1.), |window| {
-                            window.paint_glass_backdrop(bounds, radius, blur, glass);
-                            window.paint_quad(gpui::fill(bounds, color).corner_radii(radius));
+                            // one shape, fill and all, so the fill necks in with the glass
+                            window.paint_drop(bounds, radius, blur, glass, drop.waist, color);
                         })
                     });
                 },
