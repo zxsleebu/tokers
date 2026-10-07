@@ -845,6 +845,9 @@ fn choice(
         )
 }
 
+/// Colour emoji fonts across systems, tried in order; the ones not installed are skipped.
+const EMOJI_FONTS: [&str; 4] = ["Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", "Twemoji"];
+
 fn section(label: &str, theme: &Theme) -> gpui::Div {
     div().flex().flex_col().gap_3().child(
         div()
@@ -971,6 +974,14 @@ impl Render for Root {
             .relative()
             .size_full()
             .font_family("Inter")
+            .map(|mut el| {
+                // Emoji go to a colour emoji font first: left to the system's fallback,
+                // some (😂) land in DejaVu Sans, which has them as plain outlines.
+                el.text_style().font_fallbacks = Some(gpui::FontFallbacks::from_fonts(
+                    EMOJI_FONTS.iter().map(|f| f.to_string()).collect(),
+                ));
+                el
+            })
             .text_size(theme.font_size)
             .text_color(theme.foreground)
             .bg(theme.background)
