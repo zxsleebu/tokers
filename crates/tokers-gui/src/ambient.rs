@@ -29,6 +29,9 @@ const SPECS: [(f32, f32, f32, f32, f32, f32, f32); BLOBS] = [
     (0.12, 0.78, 1.05, 16., 5.1, 0.14, 0.16),
     (0.85, 0.72, 0.90, 20., 2.5, 0.16, 0.14),
 ];
+/// Wider than this (width / height) the blobs stretch sideways with the window, so a very
+/// wide one is still filled rather than dotted with circles sized to its height.
+const ROUND_UP_TO: f32 = 1.6;
 /// Concentric discs faking a radial falloff under the narrow blur.
 const DISCS: usize = 16;
 const DISC_FAINT: f32 = 0.055;
@@ -134,6 +137,7 @@ impl Render for Ambient {
         let viewport = window.viewport_size();
         let wide = f32::from(viewport.width).max(1.) / DOWNSCALE;
         let high = f32::from(viewport.height).max(1.) / DOWNSCALE;
+        let stretch = (wide / high / ROUND_UP_TO).max(1.);
 
         div()
             .absolute()
@@ -163,22 +167,25 @@ impl Render for Ambient {
                         let x = base_x + amp_x * (spin + phase).sin();
                         let y = base_y + amp_y * (spin * 0.83 + phase * 1.7).cos();
                         let grown = wide.min(high) * size * (1. + 0.12 * (spin * 0.6 + phase * 2.3).sin());
+                        let grown_w = grown * stretch;
                         let color = colors[index];
                         div()
                             .absolute()
-                            .left(px(x * wide - grown / 2.))
+                            .left(px(x * wide - grown_w / 2.))
                             .top(px(y * high - grown / 2.))
-                            .size(px(grown))
+                            .w(px(grown_w))
+                            .h(px(grown))
                             .children((0..DISCS).map(move |step| {
                                 let fraction = 1. - step as f32 / DISCS as f32 * (1. - 1. / DISCS as f32);
                                 let opacity = DISC_FAINT
                                     + step as f32 / (DISCS as f32 - 1.) * (DISC_STRONG - DISC_FAINT);
-                                let stepped = grown * fraction;
+                                let (stepped_w, stepped) = (grown_w * fraction, grown * fraction);
                                 div()
                                     .absolute()
-                                    .left(px((grown - stepped) / 2.))
+                                    .left(px((grown_w - stepped_w) / 2.))
                                     .top(px((grown - stepped) / 2.))
-                                    .size(px(stepped))
+                                    .w(px(stepped_w))
+                                    .h(px(stepped))
                                     .rounded_full()
                                     .bg(shaded(color).opacity(opacity))
                             }))
