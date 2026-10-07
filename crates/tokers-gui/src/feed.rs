@@ -44,7 +44,9 @@ const VEIL_REACH: f32 = 0.5;
 /// ...to this dimness (share of the window background); the titlebar above keeps its own
 /// lighter one, its border line marks the step.
 const VEIL_DIM: f32 = 0.7;
-/// The dimming is eased (gradients are linear, two stops): drawn in this many pieces.
+/// Past the panel's right edge (a very wide window has room there) it lets go over this.
+const VEIL_TAIL: f32 = 160.;
+/// The dimming is eased (gradients are linear, two stops): drawn in this many pieces a ramp.
 const VEIL_STEPS: usize = 12;
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
@@ -1273,8 +1275,9 @@ impl Render for FeedView {
         let blended = blend(narrow, roomy, wt);
         (closed.video, closed.actions, closed.beside) = (blended.video, blended.actions, blended.beside);
         // the panel slides in from (and out to) the right edge
+        let right_edge = roomy.content.x + roomy.content.w;
         closed.comments_panel = roomy.comments_panel.filter(|_| wt > 0.001).map(|mut p| {
-            p.x += (1. - wt) * p.w;
+            p.x += (1. - wt) * (right_edge - p.x);
             p
         });
         let open = arrange(true, if mode == Mode::Wide { Mode::Medium } else { mode });
@@ -1410,24 +1413,30 @@ impl Render for FeedView {
                 theme.background.opacity(eased * VEIL_DIM * wt)
             };
             // whole pixels, so the pieces meet without a seam
+            let ramp = |from: f32, span: f32, rising: bool| {
+                let step = (span / VEIL_STEPS as f32).round().max(1.);
+                (0..VEIL_STEPS).map(move |i| {
+                    let (t0, t1) = (i as f32 / VEIL_STEPS as f32, (i + 1) as f32 / VEIL_STEPS as f32);
+                    let (a, b) = if rising { (t0, t1) } else { (1. - t0, 1. - t1) };
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(from + i as f32 * step))
+                        .w(px(step))
+                        .bg(linear_gradient(90., linear_color_stop(dark(a), 0.), linear_color_stop(dark(b), 1.)))
+                })
+            };
             let from = (panel.x - origin.0 - VEIL_LEAD).round();
-            let step = ((VEIL_LEAD + panel.w * VEIL_REACH) / VEIL_STEPS as f32).round().max(1.);
-            let pieces = (0..VEIL_STEPS).map(|i| {
-                let (t0, t1) = (i as f32 / VEIL_STEPS as f32, (i + 1) as f32 / VEIL_STEPS as f32);
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(from + i as f32 * step))
-                    .w(px(step))
-                    .bg(linear_gradient(90., linear_color_stop(dark(t0), 0.), linear_color_stop(dark(t1), 1.)))
-            });
-            let rest = from + VEIL_STEPS as f32 * step;
+            let rise = ((VEIL_LEAD + panel.w * VEIL_REACH) / VEIL_STEPS as f32).round().max(1.) * VEIL_STEPS as f32;
+            let end = (panel.x - origin.0 + panel.w).round();
+            let tail = (VEIL_TAIL / VEIL_STEPS as f32).round() * VEIL_STEPS as f32;
             div()
                 .absolute()
                 .inset_0()
-                .children(pieces)
-                .child(div().absolute().top_0().bottom_0().right_0().left(px(rest)).bg(dark(1.)))
+                .children(ramp(from, rise, true))
+                .child(div().absolute().top_0().bottom_0().left(px(from + rise)).w(px((end - from - rise).max(0.))).bg(dark(1.)))
+                .children(ramp(end, tail, false))
         });
         let mut root = div().size_full().relative().children(veil).children(glow).child(stage);
 

@@ -3,7 +3,9 @@
 //! The video column is 9:16, never covered by chrome or cropped. The buttons are
 //! either wholly beside the video or wholly on it, never half over its edge:
 //!
-//! * wide: video anchored left at full height, buttons beside it, comments panel;
+//! * wide: video at full height, buttons beside it, comments panel up to
+//!   `COMMENTS_MAX` wide, the three centred as one group (room past the panel's
+//!   width goes to equal margins);
 //! * medium: the video centred on its own, the buttons beside it; once the buttons
 //!   would run off the right edge, the video moves left to keep them in;
 //! * overlay, once that group no longer fits: the video centred alone, the buttons
@@ -22,6 +24,8 @@ pub const TITLEBAR: f32 = 40.;
 pub const SIDEBAR: f32 = 208.;
 pub const ACTIONS: f32 = 80.;
 pub const COMMENTS_MIN: f32 = 360.;
+/// Wider than this the comment rows read poorly (likes far from the text).
+pub const COMMENTS_MAX: f32 = 600.;
 /// Share of the content height the comment sheet takes when open.
 pub const SHEET: f32 = 0.58;
 /// Once open, the panel stays until the window is this much narrower than its threshold.
@@ -110,21 +114,18 @@ impl Layout {
         let avail = content.w;
 
         if mode == Mode::Wide {
-            let beside = left + full_w;
+            let panel_w = (avail - full_w - ACTIONS).min(COMMENTS_MAX);
+            let x = left + ((avail - full_w - ACTIONS - panel_w) / 2.).max(0.);
+            let beside = x + full_w;
             return Layout {
                 mode: Mode::Wide,
                 sidebar,
                 content,
-                video: Rect::new(left, TITLEBAR, full_w, content_h),
+                video: Rect::new(x, TITLEBAR, full_w, content_h),
                 actions: Some(Rect::new(beside, TITLEBAR, ACTIONS, content_h)),
                 actions_lift: LIFT,
                 beside: 1.,
-                comments_panel: Some(Rect::new(
-                    beside + ACTIONS,
-                    TITLEBAR,
-                    width - beside - ACTIONS,
-                    content_h,
-                )),
+                comments_panel: Some(Rect::new(beside + ACTIONS, TITLEBAR, panel_w, content_h)),
                 comments_sheet: None,
             };
         }
@@ -208,6 +209,17 @@ mod tests {
         assert_eq!(l.mode, Mode::Wide);
         assert_eq!(l.video, Rect::new(0., TITLEBAR, COL, 720.));
         assert_eq!(l.comments_panel.unwrap().w, COMMENTS_MIN);
+    }
+
+    #[test]
+    fn very_wide_caps_the_panel_and_centres_the_group() {
+        let width = COL + ACTIONS + COMMENTS_MAX + 400.;
+        let l = at(width);
+        assert_eq!(l.mode, Mode::Wide);
+        let panel = l.comments_panel.unwrap();
+        assert_eq!(panel.w, COMMENTS_MAX);
+        assert_eq!(l.video.x, 200.);
+        assert_eq!(panel.x + panel.w, width - 200.);
     }
 
     #[test]
