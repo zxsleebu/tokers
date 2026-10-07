@@ -37,6 +37,15 @@ const GESTURE_GAP: Duration = Duration::from_millis(160);
 /// this far into it (px, negative: short of it), on its own curve, rather than lying under
 /// the text. The glow's blur still carries a little of it a few cells past that point.
 const GLOW_INTO_PANEL: f32 = -16.;
+/// The cover-coloured backdrop (`ambient`) shows through the panel, dimmed from this far
+/// left of its edge...
+const VEIL_LEAD: f32 = 40.;
+/// ...over this share of the panel (past the lead)...
+const VEIL_REACH: f32 = 0.5;
+/// ...to the titlebar's dimness (share of the window background), so the two meet evenly.
+const VEIL_DIM: f32 = 0.35;
+/// The dimming is eased (gradients are linear, two stops): drawn in this many pieces.
+const VEIL_STEPS: usize = 12;
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
 /// Light under a glyph or count (see `Glimpse::light_in`) where its shadow starts...
@@ -1392,7 +1401,35 @@ impl Render for FeedView {
                     .blur(px(at.h / 64.)),
             )
         });
-        let mut root = div().size_full().relative().children(glow).child(stage);
+        // under the glow: it dims the backdrop, not the video's light
+        let veil = closed.comments_panel.map(|panel| {
+            // a linear ramp shows an edge at both ends; smootherstep sets off and lands softly
+            let dark = |t: f32| {
+                let t = t.clamp(0., 1.);
+                let eased = t * t * t * (t * (t * 6. - 15.) + 10.);
+                theme.background.opacity(eased * VEIL_DIM * wt)
+            };
+            // whole pixels, so the pieces meet without a seam
+            let from = (panel.x - origin.0 - VEIL_LEAD).round();
+            let step = ((VEIL_LEAD + panel.w * VEIL_REACH) / VEIL_STEPS as f32).round().max(1.);
+            let pieces = (0..VEIL_STEPS).map(|i| {
+                let (t0, t1) = (i as f32 / VEIL_STEPS as f32, (i + 1) as f32 / VEIL_STEPS as f32);
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(from + i as f32 * step))
+                    .w(px(step))
+                    .bg(linear_gradient(90., linear_color_stop(dark(t0), 0.), linear_color_stop(dark(t1), 1.)))
+            });
+            let rest = from + VEIL_STEPS as f32 * step;
+            div()
+                .absolute()
+                .inset_0()
+                .children(pieces)
+                .child(div().absolute().top_0().bottom_0().right_0().left(px(rest)).bg(dark(1.)))
+        });
+        let mut root = div().size_full().relative().children(veil).children(glow).child(stage);
 
         self.lens.tick(window, cx);
         let picture = frame.map(|f| (fitted(f.w as f32 / f.h as f32), f));
