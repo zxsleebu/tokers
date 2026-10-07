@@ -749,23 +749,35 @@ impl FeedView {
         };
         let fg = mix(gpui::white(), theme.foreground, beside);
         let over = 1. - beside;
-        let prefs = Store::prefs(cx);
+        let prefs = Store::prefs(cx).clone();
         let (liquid, clarity) = (prefs.liquid_glass, prefs.button_clarity.clamp(0., 1.));
+        // How light it is under the buttons: the picture's edge when they cover it, the ambient
+        // light it throws when they sit beside it. Glyphs, counts and faces all answer to it.
+        let thrown = if prefs.ambilight { prefs.ambilight_strength.clamp(0., 1.) } else { 0. };
+        let shade = self.glyph_shadow.value() * (over + beside * thrown);
         let face_bg = mix(
-            gpui::black().opacity(0.32 * (1. - clarity)),
-            theme.secondary.opacity(1. - 0.55 * clarity),
+            gpui::black().opacity(0.32 * (1. - clarity) + 0.22 * shade),
+            theme.secondary.opacity(1. - 0.55 * clarity + 0.3 * shade),
             beside,
         );
         let face_hover = mix(gpui::white().opacity(0.14), theme.secondary_active, beside);
-        let label = mix(gpui::white(), theme.muted_foreground, beside);
+        // muted grey counts beside the video turn white over a lit backdrop
+        let label = mix(mix(gpui::white(), theme.muted_foreground, beside), gpui::white(), shade * beside);
         // the lens draws its own glint; beside the video a hairline keeps the face on flat paint
         let rim = theme.border.opacity(theme.border.a * beside);
-        // over the picture the counts need a shadow to stay readable on light frames
-        let shadow = gpui::TextShadow {
-            color: gpui::black().opacity(0.6 * over),
-            offset: gpui::point(px(0.), px(1.)),
-            blur: px(3.),
-        };
+        // the counts: a light shadow over the picture always, a deeper one when it is light
+        let shadows = [
+            gpui::TextShadow {
+                color: gpui::black().opacity((0.55 * over + 0.4 * shade).min(0.9)),
+                offset: gpui::point(px(0.), px(1.)),
+                blur: px(2.),
+            },
+            gpui::TextShadow {
+                color: gpui::black().opacity(0.6 * shade),
+                offset: gpui::point(px(0.), px(1.)),
+                blur: px(6.),
+            },
+        ];
         let pop = |what: &str| self.pops.get(what).filter(|(pid, _)| *pid == id).map(|(_, n)| *n);
         let faces = self.lens.faces.clone();
         let drop = self.lens.now;
@@ -777,7 +789,6 @@ impl FeedView {
             let at = f32::from(face.origin.y - origin_at.y);
             (1. - (drop.y - at).abs() / (FACE * 0.8)).clamp(0., 1.) * drop.size.clamp(0., 1.)
         };
-        let shade = self.glyph_shadow.value() * over;
 
         let button = |key: &'static str,
                       path: &'static str,
@@ -881,7 +892,7 @@ impl FeedView {
                         .text_size(theme.text(Text::Tiny))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(label)
-                        .when(beside < 0.999, |el| el.text_shadow([shadow]))
+                        .when(over > 0.001 || shade > 0.01, |el| el.text_shadow(shadows))
                         .child(count),
                 )
                 .when(current, |el| {
@@ -1147,15 +1158,18 @@ impl Render for FeedView {
                 (column.h * reach.aspect, column.h)
             };
             let (x, y) = (column.x + (column.w - w) / 2., column.y + (column.h - h) / 2.);
-            img(image)
-                .absolute()
-                .left(px(x + reach.left * w))
-                .top(px(y + reach.top * h))
-                .w(px(reach.wide * w))
-                .h(px(reach.tall * h))
-                .object_fit(ObjectFit::Fill)
-                // the grid is coarse; a blur about a cell wide hides its steps
-                .blur(px(h / 48.))
+            // kept to the feed: thrown into the titlebar it only muddied it
+            div().absolute().inset_0().overflow_hidden().child(
+                img(image)
+                    .absolute()
+                    .left(px(x + reach.left * w))
+                    .top(px(y + reach.top * h))
+                    .w(px(reach.wide * w))
+                    .h(px(reach.tall * h))
+                    .object_fit(ObjectFit::Fill)
+                    // the grid is coarse; a blur about a cell wide hides its steps
+                    .blur(px(h / 48.)),
+            )
         });
         let mut root = div().size_full().relative().children(glow).child(stage);
 

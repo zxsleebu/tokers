@@ -27,6 +27,8 @@ const DEPTH: f32 = 0.12;
 const FADE_START: f32 = 0.12;
 /// Exponent of the fade: above 1 drops quickly near the video and trails off softly.
 const FADE_CURVE: f32 = 1.7;
+/// The glow at its strongest, right at the video: a wash, never a second picture.
+const PEAK: f32 = 0.7;
 /// Time constant of the blend toward each new frame (s): no flicker, still follows cuts.
 const SMOOTH: f32 = 0.12;
 /// A row or column of the glimpse darker than this (mean luma) is a candidate bar...
@@ -124,7 +126,7 @@ impl Ambilight {
         }
 
         let k = 1. - (-dt / SMOOTH).exp();
-        let lit = (strength * 1.6).clamp(0., 2.);
+        let lit = strength.clamp(0., 1.);
         let mut alive = false;
         for oy in 0..self.h {
             for ox in 0..self.w {
@@ -176,7 +178,7 @@ impl Ambilight {
         // beyond the edge, in cells; the larger of the two, so the sides meet on the diagonals
         let out = ((qx.abs() - 0.5) * vw).max((qy.abs() - 0.5) * vh).max(0.) / edge;
         let fade = ((out - FADE_START) / (1. - FADE_START)).clamp(0., 1.);
-        let alpha = (1. - fade).powf(FADE_CURVE);
+        let alpha = PEAK * (1. - fade).powf(FADE_CURVE);
         if alpha <= 0. {
             return [0.; 4];
         }
