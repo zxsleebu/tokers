@@ -761,14 +761,15 @@ impl FeedView {
             beside,
         );
         let face_hover = mix(gpui::white().opacity(0.14), theme.secondary_active, beside);
-        // muted grey counts beside the video turn white over a lit backdrop
-        let label = mix(mix(gpui::white(), theme.muted_foreground, beside), gpui::white(), shade * beside);
+        // the counts are white wherever the buttons sit, like their glyphs
+        let label = mix(gpui::white(), theme.foreground, beside);
         // the lens draws its own glint; beside the video a hairline keeps the face on flat paint
         let rim = theme.border.opacity(theme.border.a * beside);
-        // the counts: a light shadow over the picture always, a deeper one when it is light
+        // the counts: a light shadow always (the picture or the light it throws is under
+        // them), a deeper one when it is light
         let shadows = [
             gpui::TextShadow {
-                color: gpui::black().opacity((0.55 * over + 0.4 * shade).min(0.9)),
+                color: gpui::black().opacity((0.5 + 0.1 * over + 0.4 * shade).min(0.9)),
                 offset: gpui::point(px(0.), px(1.)),
                 blur: px(2.),
             },
@@ -892,7 +893,7 @@ impl FeedView {
                         .text_size(theme.text(Text::Tiny))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(label)
-                        .when(over > 0.001 || shade > 0.01, |el| el.text_shadow(shadows))
+                        .text_shadow(shadows)
                         .child(count),
                 )
                 .when(current, |el| {
