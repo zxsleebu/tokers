@@ -1,11 +1,14 @@
 //! The window: title bar, sidebar (or its drawer), the page, toasts, and the
 //! theme that follows the cover on screen.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, AnyView, App, Context, Entity, FocusHandle, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    AnyElement, AnyView, App, Bounds, Context, Entity, FocusHandle, FontWeight, Hsla, MouseButton,
+    MouseDownEvent, Pixels, anchored, canvas, deferred, point, relative,
     MouseMoveEvent, ObjectFit, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
     StyleRefinement, Window, div, img, px,
 };
@@ -15,11 +18,14 @@ use crate::ambient::Ambient;
 use crate::feed::{FeedEvent, FeedView};
 use crate::layout::{Layout, SIDEBAR, TITLEBAR};
 use crate::media::Images;
-use crate::motion::{Motion, Motioned as _, Rising as _, Spring, Springs, Veiling as _, ease_out_cubic};
+use crate::motion::{Rising as _, Spring, Springs, Veiling as _, ease_out_cubic};
 use crate::scrollbar::Scrollbar;
 use crate::state::{CommentsMode, Store, downloads_dir};
 use crate::theme::{ActiveTheme as _, Palette, Text, Theme};
-use crate::ui::{Button, icon, slider, window_controls, window_frame, window_radius};
+use crate::ui::{
+    Button, Switch, eyebrow, icon, menu_item, menu_panel, separator, slider, tab_bar, window_controls,
+    window_frame, window_radius,
+};
 use crate::*;
 
 const ROW: f32 = 36.;
@@ -72,7 +78,52 @@ pub struct Root {
     favourites_bar: Entity<Scrollbar>,
     settings_scroll: ScrollHandle,
     settings_bar: Entity<Scrollbar>,
+    settings_tab: SettingsTab,
+    /// The settings dropdown that is open, and where its button was painted.
+    settings_menu: Option<&'static str>,
+    menu_at: Rc<Cell<Bounds<Pixels>>>,
 }
+
+/// The categories of the settings page, as in Sonora's category bar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    General,
+    Appearance,
+    Keys,
+    About,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 4] = [Self::General, Self::Appearance, Self::Keys, Self::About];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "Общие",
+            Self::Appearance => "Внешний вид",
+            Self::Keys => "Клавиши",
+            Self::About => "О программе",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::General => "icons/settings.svg",
+            Self::Appearance => "icons/palette.svg",
+            Self::Keys => "icons/keyboard.svg",
+            Self::About => "icons/info.svg",
+        }
+    }
+}
+
+/// The settings column, as wide as Sonora's.
+const SETTINGS_WIDTH: f32 = 640.;
+/// The header over it: the category bar (36 px) with 24 px above and below.
+const SETTINGS_HEADER: f32 = 84.;
+/// How far past the header the rows keep dissolving, so they leave no hard edge under it.
+const SETTINGS_FADE_TAIL: f32 = 48.;
+/// A dropdown's width (Sonora's `Picker::NARROW` and `REGULAR`).
+const PICKER_NARROW: f32 = 170.;
+const PICKER_REGULAR: f32 = 190.;
 
 impl Root {
     pub fn new(
@@ -111,6 +162,9 @@ impl Root {
             favourites_bar,
             settings_scroll,
             settings_bar,
+            settings_tab: SettingsTab::General,
+            settings_menu: None,
+            menu_at: Rc::default(),
         }
     }
 
@@ -576,163 +630,343 @@ impl Root {
         )
     }
 
+    /// Sonora's settings page: a category bar floating at the top, the rows of the chosen
+    /// category under it in one column, dissolving as they scroll up beneath the bar.
     fn settings(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
-        let prefs = Store::prefs(cx).clone();
-        let mode = prefs.comments_mode;
-        let option = |id: &'static str, value: CommentsMode, title: &'static str, about: &'static str| {
-            choice(id, mode == value, title, about, &theme)
-                .on_click(move |_, _, cx| Store::update_prefs(cx, |p| p.comments_mode = value))
+        let rows: Vec<AnyElement> = match self.settings_tab {
+            SettingsTab::General => self.general_rows(cx),
+            SettingsTab::Appearance => self.appearance_rows(cx),
+            SettingsTab::Keys => key_rows(&theme),
+            SettingsTab::About => about_rows(&theme),
         };
-        let glass = |id: &'static str, value: bool, title: &'static str, about: &'static str| {
-            choice(id, prefs.liquid_glass == value, title, about, &theme)
-                .on_click(move |_, _, cx| Store::update_prefs(cx, |p| p.liquid_glass = value))
-        };
-        let keys: [(&str, &str); 12] = [
-            ("J / ↓", "следующее видео"),
-            ("K / ↑", "предыдущее"),
-            ("Пробел", "пауза"),
-            ("← →", "перемотка ±5 с / фото"),
-            ("L", "лайк"),
-            ("C", "комментарии"),
-            ("S", "в избранное"),
-            ("M", "звук"),
-            ("Y", "скопировать ссылку"),
-            ("D", "скачать"),
-            ("Ctrl+B", "сайдбар"),
-            ("Esc", "закрыть"),
-        ];
-        scroll_area(
-            "settings",
-            &self.settings_scroll,
-            &self.settings_bar,
-            div()
-                    .max_w(px(640.))
-                    .p_6()
+        let chosen = self.settings_tab;
+        let categories = tab_bar(
+            SettingsTab::ALL.map(|tab| {
+                Button::new(SharedString::from(format!("settings-tab-{}", tab.label())))
+                    .label(tab.label())
+                    .icon(tab.icon())
+                    .small()
+                    .selected(tab == chosen)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_tab = tab;
+                        this.settings_menu = None;
+                        this.settings_scroll.set_offset(point(px(0.), px(0.)));
+                        cx.notify();
+                    }))
+            }),
+            &theme,
+        );
+        let (wheel, hover) = (self.settings_bar.clone(), self.settings_bar.clone());
+        div()
+            .id("settings")
+            .relative()
+            .size_full()
+            .on_hover(move |hovered, _, cx| hover.update(cx, |b, cx| b.set_hovered(*hovered, cx)))
+            .child(
+                div()
+                    .id("settings-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.settings_scroll)
+                    .on_scroll_wheel(move |e, window, cx| wheel.update(cx, |b, cx| b.wheel(e, window, cx)))
+                    // the rows dissolve over the header's height as they pass under it
+                    .fade_edges(px(SETTINGS_HEADER + SETTINGS_FADE_TAIL), px(0.))
                     .flex()
                     .flex_col()
-                    .gap_6()
-                    .child(heading("Настройки", "Хранятся локально".into(), &theme))
+                    .items_center()
                     .child(
-                        section("Комментарии в узком окне", &theme)
-                            .child(option(
-                                "mode-sheet",
-                                CommentsMode::Sheet,
-                                "Шторкой снизу",
-                                "Видео уменьшается и уезжает вверх, комментарии выезжают снизу.",
-                            ))
-                            .child(option(
-                                "mode-expand",
-                                CommentsMode::Expand,
-                                "Расширять окно вправо",
-                                "Окно растёт до широкого режима и возвращается обратно. В тайлинговых WM — шторка.",
-                            )),
-                    )
-
-                    .child(
-                        section("Кнопки у видео", &theme)
-                            .child(glass(
-                                "glass-liquid",
-                                true,
-                                "Жидкое стекло",
-                                "Край кнопки преломляет видео под ней, по ободку бежит блик. Линза пока есть только на Linux.",
-                            ))
-                            .child(glass(
-                                "glass-frosted",
-                                false,
-                                "Матовое стекло",
-                                "Кнопки просто размывают то, что под ними.",
-                            ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .pt_1()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .justify_between()
-                                            .child(div().font_weight(FontWeight::MEDIUM).child("Прозрачность"))
-                                            .child(
-                                                div()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(format!("{}%", (prefs.button_clarity * 100.).round())),
-                                            ),
-                                    )
-                                    .child(slider(
-                                        "button-clarity",
-                                        prefs.button_clarity,
-                                        |v, cx| Store::tweak_prefs(cx, |p| p.button_clarity = v),
-                                        Store::save_prefs,
-                                        cx,
-                                    )),
-                            ),
-                    )
-                    .child(
-                        section("Подсветка вокруг видео", &theme)
-                            .child(
-                                choice(
-                                    "ambilight",
-                                    prefs.ambilight,
-                                    "Свечение цветами видео",
-                                    "Края видео подсвечивают фон вокруг него, как Ambilight у телевизоров. Чёрные полосы не светят.",
-                                    &theme,
-                                )
-                                .on_click(|_, _, cx| Store::update_prefs(cx, |p| p.ambilight = !p.ambilight)),
-                            )
-                            .child(labelled_slider(
-                                "ambilight-strength",
-                                "Яркость",
-                                prefs.ambilight_strength,
-                                |p, v| p.ambilight_strength = v,
-                                &theme,
-                                cx,
-                            ))
-                            .child(labelled_slider(
-                                "ambilight-spread",
-                                "Размах",
-                                prefs.ambilight_spread,
-                                |p, v| p.ambilight_spread = v,
-                                &theme,
-                                cx,
-                            )),
-                    )
-                    .child(
-                        section("Клавиши", &theme).child(div().grid().grid_cols(2).gap_x_6().gap_y_2().children(keys.iter().map(
-                            |(k, what)| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .min_w(px(64.))
-                                            .px_2()
-                                            .py_0p5()
-                                            .rounded(px(4.))
-                                            .bg(theme.secondary)
-                                            .border_1()
-                                            .border_color(theme.border)
-                                            .text_size(theme.text(Text::Small))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_center()
-                                            .child(*k),
-                                    )
-                                    .child(div().text_color(theme.muted_foreground).child(*what))
-                            },
-                        ))),
-                    )
-                    .child(
-                        section("О программе", &theme).child(
-                            div()
-                                .text_color(theme.muted_foreground)
-                                .text_size(theme.text(Text::Small))
-                                .child("tokers — нативный клиент TikTok на gpui. Стиль и анимации по мотивам Sonora."),
-                        ),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .max_w(px(SETTINGS_WIDTH))
+                            .px_6()
+                            .pb_6()
+                            .pt(px(SETTINGS_HEADER))
+                            .children(rows),
                     ),
-        )
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(SETTINGS_HEADER))
+                    .flex()
+                    .justify_center()
+                    .items_center()
+                    .px_6()
+                    .child(categories),
+            )
+            .child(self.settings_bar.clone())
+            .into_any_element()
     }
+
+    fn general_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = *cx.theme();
+        let mode = Store::prefs(cx).comments_mode;
+        let label = |mode: CommentsMode| match mode {
+            CommentsMode::Sheet => "Шторкой снизу",
+            CommentsMode::Expand => "Расширять окно",
+        };
+        let picker = self.picker(
+            "comments-mode",
+            label(mode),
+            PICKER_REGULAR,
+            [CommentsMode::Sheet, CommentsMode::Expand].map(|value| {
+                (label(value), value == mode, Box::new(move |cx: &mut App| {
+                    Store::update_prefs(cx, |p| p.comments_mode = value)
+                }) as Pick)
+            }),
+            cx,
+        );
+        vec![
+            title("Комментарии", &theme),
+            setting_row(
+                "В узком окне",
+                "Когда сбоку нет места: шторка снизу или окно растёт вправо",
+                picker,
+                &theme,
+            ),
+        ]
+    }
+
+    fn appearance_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = *cx.theme();
+        let prefs = Store::prefs(cx).clone();
+        let glass_label = |liquid: bool| if liquid { "Жидкое" } else { "Матовое" };
+        let glass = self.picker(
+            "glass",
+            glass_label(prefs.liquid_glass),
+            PICKER_NARROW,
+            [true, false].map(|liquid| {
+                (glass_label(liquid), liquid == prefs.liquid_glass, Box::new(move |cx: &mut App| {
+                    Store::update_prefs(cx, |p| p.liquid_glass = liquid)
+                }) as Pick)
+            }),
+            cx,
+        );
+        let clarity = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().w(px(140.)).child(slider(
+                "button-clarity",
+                prefs.button_clarity,
+                |v, cx| Store::tweak_prefs(cx, |p| p.button_clarity = v),
+                Store::save_prefs,
+                cx,
+            )))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(48.))
+                    .whitespace_nowrap()
+                    .text_right()
+                    .child(format!("{}%", (prefs.button_clarity * 100.).round())),
+            );
+        let ambilight = Switch::new("ambilight", prefs.ambilight)
+            .on_click(|_, _, cx| Store::update_prefs(cx, |p| p.ambilight = !p.ambilight));
+        vec![
+            title("Кнопки у видео", &theme),
+            setting_row("Стекло", "Жидкое преломляет видео по краю, матовое просто размывает", glass, &theme),
+            separator(&theme).into_any_element(),
+            setting_row("Прозрачность", "Насколько кнопки просвечивают", clarity, &theme),
+            title("Видео", &theme),
+            setting_row(
+                "Подсветка вокруг видео",
+                "Края видео светят на фон цветами кадра, как Ambilight",
+                ambilight,
+                &theme,
+            ),
+        ]
+    }
+
+    /// A dropdown (Sonora's `Picker`): an outlined button with the current choice, and under
+    /// its right edge a menu of the choices, the current one ticked.
+    fn picker<const N: usize>(
+        &mut self,
+        key: &'static str,
+        current: &'static str,
+        width: f32,
+        choices: [(&'static str, bool, Pick); N],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = *cx.theme();
+        let open = self.settings_menu == Some(key);
+        let at = self.menu_at.clone();
+        let mut el = div()
+            .relative()
+            .child(
+                Button::new(SharedString::from(format!("{key}-picker")))
+                    .label(current)
+                    .trailing("icons/chevron-down.svg")
+                    .outline()
+                    .small()
+                    .selected(open)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_menu = if this.settings_menu == Some(key) { None } else { Some(key) };
+                        cx.notify();
+                    })),
+            )
+            .when(open, |el| {
+                el.child(canvas(move |bounds, _, _| at.set(bounds), |_, _, _, _| {}).absolute().inset_0())
+            });
+        if open {
+            let at = self.menu_at.get();
+            let items = choices.into_iter().enumerate().map(|(i, (label, selected, pick))| {
+                menu_item(SharedString::from(format!("{key}-{i}")), label, selected, &theme).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        pick(cx);
+                        this.settings_menu = None;
+                        cx.notify();
+                    },
+                ))
+            });
+            let menu = menu_panel(px(width), &theme)
+                .id(SharedString::from(format!("{key}-menu")))
+                .occlude()
+                .text_size(theme.text(Text::Label))
+                .children(items)
+                .on_mouse_down_out(cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    // its own button toggles it
+                    if !this.menu_at.get().contains(&e.position) {
+                        this.settings_menu = None;
+                        cx.notify();
+                    }
+                }))
+                .rising(SharedString::from(format!("{key}-menu-in")));
+            el = el.child(
+                deferred(
+                    anchored()
+                        .position(point(at.right() - px(width), at.bottom() + px(4.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(menu),
+                )
+                .with_priority(1),
+            );
+        }
+        el.into_any_element()
+    }
+}
+
+/// What a dropdown choice does when picked.
+type Pick = Box<dyn Fn(&mut App)>;
+
+/// A group's title, at the foot of a row's height (Sonora's `Slot::Title`).
+fn title(label: &str, theme: &Theme) -> AnyElement {
+    div().h(px(42.)).flex().flex_col().justify_end().pb_1().child(eyebrow(label, theme)).into_any_element()
+}
+
+/// One setting (Sonora's `SettingsView::row`): its name and a muted line about it on the left,
+/// its control on the right.
+fn setting_row(name: &str, detail: &str, control: impl IntoElement, theme: &Theme) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .py_3()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().line_height(relative(1.25)).child(name.to_string()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .line_height(relative(1.25))
+                        .text_color(theme.muted_foreground)
+                        .text_size(theme.text(Text::Small))
+                        .child(detail.to_string()),
+                ),
+        )
+        .child(div().flex_none().child(control))
+        .into_any_element()
+}
+
+/// The keys, one row each, separated like the settings, the key in a cap on the right.
+fn key_rows(theme: &Theme) -> Vec<AnyElement> {
+    let groups: [(&str, &[(&str, &str)]); 3] = [
+        (
+            "Лента",
+            &[
+                ("Следующее видео", "J / ↓"),
+                ("Предыдущее", "K / ↑"),
+                ("Пауза", "Пробел"),
+                ("Перемотка ±5 с, листать фото", "← →"),
+                ("Звук", "M"),
+            ],
+        ),
+        (
+            "Видео",
+            &[("Лайк", "L"), ("Комментарии", "C"), ("В избранное", "S"), ("Скопировать ссылку", "Y"), ("Скачать", "D")],
+        ),
+        ("Окно", &[("Сайдбар", "Ctrl+B"), ("Закрыть", "Esc")]),
+    ];
+    let cap = |key: &str| {
+        div()
+            .min_w(px(64.))
+            .px_2()
+            .py_0p5()
+            .rounded(px(4.))
+            .bg(theme.secondary)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(theme.text(Text::Small))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_center()
+            .child(key.to_string())
+    };
+    let mut rows = Vec::new();
+    for (group, keys) in groups {
+        rows.push(title(group, theme));
+        for (i, (what, key)) in keys.iter().enumerate() {
+            if i > 0 {
+                rows.push(separator(theme).into_any_element());
+            }
+            rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .py_3()
+                    .child(what.to_string())
+                    .child(cap(key))
+                    .into_any_element(),
+            );
+        }
+    }
+    rows
+}
+
+fn about_rows(theme: &Theme) -> Vec<AnyElement> {
+    let source = Button::new("about-source")
+        .label("Открыть")
+        .outline()
+        .small()
+        .on_click(|_, _, cx| cx.open_url("https://github.com/zxsleebu/tokers"));
+    vec![
+        title("tokers", theme),
+        setting_row("Версия", env!("CARGO_PKG_VERSION"), div(), theme),
+        separator(theme).into_any_element(),
+        setting_row("Исходный код", "github.com/zxsleebu/tokers", source, theme),
+        div()
+            .pt_6()
+            .text_size(theme.text(Text::Small))
+            .text_color(theme.muted_foreground)
+            .child("Нативный клиент TikTok на gpui. Стиль, анимации и эти настройки — по мотивам Sonora.")
+            .into_any_element(),
+    ]
 }
 
 /// A vertically scrolling page with an overlay scrollbar.
@@ -772,91 +1006,8 @@ fn heading(title: &str, sub: String, theme: &Theme) -> impl IntoElement {
         .child(div().text_color(theme.muted_foreground).child(sub))
 }
 
-/// A setting's name, its value in percent and a slider for it.
-fn labelled_slider(
-    id: &'static str,
-    label: &'static str,
-    value: f32,
-    set: fn(&mut crate::state::Prefs, f32),
-    theme: &Theme,
-    cx: &App,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .pt_1()
-        .child(
-            div().flex().justify_between().child(div().font_weight(FontWeight::MEDIUM).child(label)).child(
-                div().text_color(theme.muted_foreground).child(format!("{}%", (value * 100.).round())),
-            ),
-        )
-        .child(slider(id, value, move |v, cx| Store::tweak_prefs(cx, |p| set(p, v)), Store::save_prefs, cx))
-}
-
-/// A radio row: a dot, a title and a line about it.
-fn choice(
-    id: &'static str,
-    on: bool,
-    title: &'static str,
-    about: &'static str,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_start()
-        .gap_3()
-        .p_3()
-        .rounded(px(8.))
-        .border_1()
-        .border_color(if on { theme.primary.opacity(0.6) } else { theme.border })
-        .bg(if on { theme.secondary } else { gpui::transparent_black() })
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.secondary_hover))
-        .child(
-            div()
-                .mt_0p5()
-                .size(px(16.))
-                .flex_none()
-                .rounded_full()
-                .border_1()
-                .border_color(if on { theme.primary } else { theme.muted_foreground })
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(on, |el| {
-                    el.child(div().size(px(8.)).rounded_full().bg(theme.primary).motion(
-                        SharedString::from(format!("radio-{id}")),
-                        Motion::Quick,
-                        |el, t| el.layer_scale(t),
-                    ))
-                }),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(div().font_weight(FontWeight::MEDIUM).child(title))
-                .child(
-                    div().text_size(theme.text(Text::Small)).text_color(theme.muted_foreground).child(about),
-                ),
-        )
-}
-
 /// Colour emoji fonts across systems, tried in order; the ones not installed are skipped.
 const EMOJI_FONTS: [&str; 4] = ["Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", "Twemoji"];
-
-fn section(label: &str, theme: &Theme) -> gpui::Div {
-    div().flex().flex_col().gap_3().child(
-        div()
-            .text_size(theme.text(Text::Small))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(theme.muted_foreground)
-            .child(label.to_uppercase()),
-    )
-}
 
 type Act = Box<dyn Fn(&mut Window, &mut App) + 'static>;
 

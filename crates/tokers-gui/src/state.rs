@@ -33,17 +33,6 @@ pub struct Prefs {
     pub button_clarity: f32,
     /// The video throws its own colours around it, like an Ambilight TV.
     pub ambilight: bool,
-    /// Its brightness, 0..1.
-    pub ambilight_strength: f32,
-    /// How far it reaches, 0..1 (see `ambilight_reach`).
-    pub ambilight_spread: f32,
-}
-
-impl Prefs {
-    /// The glow's reach beyond the picture, as a share of the picture's height.
-    pub fn ambilight_reach(&self) -> f32 {
-        0.1 + 0.4 * self.ambilight_spread.clamp(0., 1.)
-    }
 }
 
 impl Default for Prefs {
@@ -56,8 +45,6 @@ impl Default for Prefs {
             liquid_glass: true,
             button_clarity: 0.75,
             ambilight: true,
-            ambilight_strength: 0.7,
-            ambilight_spread: 0.5,
         }
     }
 }

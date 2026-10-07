@@ -60,6 +60,9 @@ const ICONS: &[(&str, &[u8])] = embed![
     "icons/thumbs-down.svg",
     "icons/thumbs-down-filled.svg",
     "icons/x.svg",
+    "icons/palette.svg",
+    "icons/info.svg",
+    "icons/keyboard.svg",
 ];
 
 pub struct Assets;

@@ -49,6 +49,10 @@ const VEIL_DIM: f32 = 0.7;
 const VEIL_TAIL: f32 = 160.;
 /// The dimming is eased (gradients are linear, two stops): drawn in this many pieces a ramp.
 const VEIL_STEPS: usize = 12;
+/// How far the glow around the video reaches, as a share of the picture's height...
+const AMBILIGHT_REACH: f32 = 0.3;
+/// ...and how bright it is (0..1).
+const AMBILIGHT_STRENGTH: f32 = 0.7;
 /// Comments (with their images) of this many videos already watched stay loaded...
 const RECENT_KEPT: usize = 10;
 /// ...and those of this many videos ahead are fetched once the current one has stayed.
@@ -1491,8 +1495,8 @@ impl Render for FeedView {
         });
         let thrown = self.ambilight.update(
             frame.clone().filter(|_| prefs.ambilight),
-            prefs.ambilight_reach(),
-            prefs.ambilight_strength,
+            AMBILIGHT_REACH,
+            AMBILIGHT_STRENGTH,
             room,
             window,
         );

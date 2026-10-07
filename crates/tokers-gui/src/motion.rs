@@ -23,7 +23,6 @@ impl Springs {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Motion {
-    Quick,
     Base,
     Slow,
 }
@@ -31,7 +30,6 @@ pub enum Motion {
 impl Motion {
     pub fn span(self) -> Duration {
         Duration::from_millis(match self {
-            Motion::Quick => 120,
             Motion::Base => 200,
             Motion::Slow => 320,
         })
@@ -41,7 +39,7 @@ impl Motion {
         let animation = Animation::new(self.span());
         match self {
             Motion::Base => animation.with_easing(ease_in_out),
-            Motion::Quick | Motion::Slow => animation.with_easing(ease_out_quint()),
+            Motion::Slow => animation.with_easing(ease_out_quint()),
         }
     }
 }
