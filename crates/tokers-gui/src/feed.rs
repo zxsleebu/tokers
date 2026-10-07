@@ -2,7 +2,7 @@
 //! the action buttons beside them and the comments, placed by [`Layout`].
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -11,7 +11,7 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, AnyView, Bounds, Context, Entity, EventEmitter, FontWeight, Hsla, MouseButton, ObjectFit,
     Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, SpringConfig, StyleRefinement,
-    TouchPhase, Window, canvas, div, img, linear_color_stop, linear_gradient, px, size,
+    Task, TouchPhase, Window, canvas, div, img, linear_color_stop, linear_gradient, px, size,
 };
 use tokers::TikTok;
 use tokers::endpoints::Feed;
@@ -48,6 +48,10 @@ const VEIL_DIM: f32 = 0.7;
 const VEIL_TAIL: f32 = 160.;
 /// The dimming is eased (gradients are linear, two stops): drawn in this many pieces a ramp.
 const VEIL_STEPS: usize = 12;
+/// Comments (with their images) of this many videos already watched stay loaded...
+const RECENT_KEPT: usize = 10;
+/// ...and those of this many videos ahead are fetched once the current one has stayed.
+const COMMENTS_AHEAD: usize = 2;
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
 /// Light under a glyph or count (see `Glimpse::light_in`) where its shadow starts...
@@ -216,6 +220,12 @@ pub struct FeedView {
     current_since: Instant,
     /// The video `current_since` counts from.
     current_id: Option<String>,
+    /// Comments views by video: the current one, the ones ahead, the recently watched.
+    comment_views: HashMap<String, Entity<CommentsView>>,
+    /// Videos that were current, the latest last (at most `RECENT_KEPT`).
+    recent: VecDeque<String>,
+    /// Fetches the comments ahead once the current video has stayed a moment.
+    comments_ahead: Option<Task<()>>,
     /// The overlay caption shows its whole description.
     desc_open: bool,
     /// Window scale factor at the last render.
@@ -297,6 +307,9 @@ impl FeedView {
             viewport: size(px(720.), px(1280.)),
             current_since: Instant::now(),
             current_id: None,
+            comment_views: HashMap::new(),
+            recent: VecDeque::new(),
+            comments_ahead: None,
             desc_open: false,
             scale: 1.,
             leaving: None,
@@ -401,9 +414,27 @@ impl FeedView {
         // coming often enough the comments never came.)
         let current = self.current().map(|a| a.aweme_id.clone());
         if current != self.current_id {
-            self.current_id = current;
-            self.comments = None;
+            if let Some(left) = self.current_id.take() {
+                self.recent.retain(|id| *id != left);
+                self.recent.push_back(left);
+                while self.recent.len() > RECENT_KEPT {
+                    self.recent.pop_front();
+                }
+            }
+            self.current_id = current.clone();
+            // back on a video seen a moment ago: its comments are as they were left
+            self.comments = current.as_ref().and_then(|id| self.comment_views.get(id).cloned());
             self.current_since = Instant::now();
+            self.keep_only_recent(cx);
+            self.comments_ahead = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(COMMENTS_DELAY).await;
+                this.update(cx, |this, cx| {
+                    if this.current_id == current {
+                        this.fetch_comments_ahead(cx);
+                    }
+                })
+                .ok();
+            }));
         }
         if self.items.len().saturating_sub(self.index + 1) < LOOKAHEAD {
             self.load_more(cx);
@@ -421,13 +452,47 @@ impl FeedView {
         }
         let Some(aweme) = self.current().cloned() else { return };
         let wait = COMMENTS_DELAY.saturating_sub(self.current_since.elapsed());
-        // the comments being looked at go ahead of feed prefetches
-        let view = cx.new(|cx| CommentsView::new(self.tiktok.urgent(), self.io.clone(), aweme, wait, cx));
+        self.comments = Some(self.comments_view(aweme, wait, cx));
+    }
+
+    /// The comments view of a video, made (and kept) if there is none yet.
+    fn comments_view(&mut self, aweme: Aweme, wait: Duration, cx: &mut Context<Self>) -> Entity<CommentsView> {
+        if let Some(view) = self.comment_views.get(&aweme.aweme_id) {
+            return view.clone();
+        }
+        let id = aweme.aweme_id.clone();
+        let height = f32::from(self.viewport.height);
+        // the comments being looked at (or about to be) go ahead of feed prefetches
+        let view =
+            cx.new(|cx| CommentsView::new(self.tiktok.urgent(), self.io.clone(), aweme, wait, height, cx));
         cx.subscribe(&view, |this, _, event, cx| match event {
             CommentsEvent::Close => this.close_comments(cx),
         })
         .detach();
-        self.comments = Some(view);
+        self.comment_views.insert(id, view.clone());
+        view
+    }
+
+    /// The current video's comments and the next ones', first page and images, so they
+    /// are there when opened or paged to.
+    fn fetch_comments_ahead(&mut self, cx: &mut Context<Self>) {
+        let ahead: Vec<Aweme> = self.items.iter().skip(self.index).take(1 + COMMENTS_AHEAD).cloned().collect();
+        for aweme in ahead {
+            self.comments_view(aweme, Duration::ZERO, cx);
+        }
+    }
+
+    /// Videos whose comments (and images) stay: the recently watched, the current one and
+    /// those ahead.
+    fn kept_ids(&self) -> HashSet<String> {
+        let ahead = self.items.iter().skip(self.index).take(1 + COMMENTS_AHEAD).map(|a| a.aweme_id.clone());
+        self.recent.iter().cloned().chain(ahead).collect()
+    }
+
+    fn keep_only_recent(&mut self, cx: &mut Context<Self>) {
+        let kept = self.kept_ids();
+        self.comment_views.retain(|id, _| kept.contains(id));
+        Images::hold_only(kept.iter().map(String::as_str), cx);
     }
 
     fn apply_volume(&mut self, cx: &mut Context<Self>) {
@@ -718,7 +783,7 @@ impl FeedView {
         let theme = *cx.theme();
         let aweme = &self.items[i];
         let current = i == self.index;
-        let cover = Images::get(cover(aweme), COVER_PX, cx);
+        let cover = Images::get_for(&aweme.aweme_id, cover(aweme), COVER_PX, cx);
         let player = self.players.get(&aweme.aweme_id).cloned();
         let has_frame = player.as_ref().is_some_and(|p| p.read(cx).has_frame());
 
@@ -728,7 +793,7 @@ impl FeedView {
             let images = &aweme.image_post_info.images;
             let at =
                 self.photo.get(&aweme.aweme_id).copied().unwrap_or(0).min(images.len().saturating_sub(1));
-            let image = Images::get(&images[at].display_image, 1280, cx);
+            let image = Images::get_for(&aweme.aweme_id, &images[at].display_image, 1280, cx);
             slide = slide
                 .when_some(image, |el, image| {
                     el.child(
@@ -817,8 +882,8 @@ impl FeedView {
         let id = aweme.aweme_id.clone();
         let liked = Store::is_liked(&id, cx);
         let saved = Store::is_favourite(&id, cx);
-        let avatar = Images::get(&aweme.author.avatar_thumb, 96, cx);
-        let music_cover = Images::get(aweme.music.cover(), 96, cx);
+        let avatar = Images::get_for(&aweme.aweme_id, &aweme.author.avatar_thumb, 96, cx);
+        let music_cover = Images::get_for(&aweme.aweme_id, aweme.music.cover(), 96, cx);
         let s = &aweme.statistics;
         let profile = format!("https://www.tiktok.com/@{}", aweme.author.handle());
         let music = if aweme.music.music_id().is_empty() {

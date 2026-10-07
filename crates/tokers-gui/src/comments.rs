@@ -170,6 +170,7 @@ impl CommentsView {
         io: tokio::runtime::Handle,
         aweme: Aweme,
         fetch_after: std::time::Duration,
+        viewport_h: f32,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&Images::entity(cx), |_, _, cx| cx.notify()).detach();
@@ -209,7 +210,7 @@ impl CommentsView {
             votes: HashMap::new(),
             waiting: false,
             seen_end: 0,
-            viewport_h: 600.,
+            viewport_h,
             order: Order::Top,
             shown: Vec::new(),
             filter_pages: 0,
@@ -224,8 +225,10 @@ impl CommentsView {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(fetch_after).await;
                 this.update(cx, |this, cx| {
-                    this.waiting = false;
-                    this.load_more(cx);
+                    if this.waiting {
+                        this.waiting = false;
+                        this.load_more(cx);
+                    }
                 })
                 .ok();
             })
@@ -306,7 +309,9 @@ impl CommentsView {
     /// viewport below the visible ones, so they are in by the time they scroll into view.
     fn preload_below(&mut self, cx: &mut Context<Self>) {
         let from = self.seen_end.max(self.lead());
-        let rows = (self.viewport_h * PRELOAD_SHARE / ROW_MIN).ceil() as usize;
+        // never shown yet (fetched ahead): the rows that will be in view count too
+        let share = if self.seen_end == 0 { 1. + PRELOAD_SHARE } else { PRELOAD_SHARE };
+        let rows = (self.viewport_h * share / ROW_MIN).ceil() as usize;
         let to = (from + rows).min(self.footer_ix());
         let wanted: Vec<(UrlList, u32)> = (from..to)
             .flat_map(|ix| {
@@ -317,7 +322,7 @@ impl CommentsView {
             })
             .collect();
         for (list, size) in wanted {
-            Images::get(&list, size, cx);
+            Images::get_for(&self.aweme.aweme_id, &list, size, cx);
         }
     }
 
@@ -327,7 +332,7 @@ impl CommentsView {
         let count = (thread.ahead / REPLY_MIN).ceil() as usize;
         let wanted: Vec<_> = thread.items.iter().take(count).flat_map(images_of).collect();
         for (list, size) in wanted {
-            Images::get(&list, size, cx);
+            Images::get_for(&self.aweme.aweme_id, &list, size, cx);
         }
     }
 
@@ -638,7 +643,7 @@ impl CommentsView {
     fn header(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
         let author = &self.aweme.author;
-        let avatar = Images::get(&author.avatar_thumb, 96, cx);
+        let avatar = Images::get_for(&self.aweme.aweme_id, &author.avatar_thumb, 96, cx);
         let profile = format!("https://www.tiktok.com/@{}", author.handle());
         let music = &self.aweme.music;
         div()
@@ -731,12 +736,12 @@ impl CommentsView {
     fn row(&self, comment: &Comment, depth: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
         let size = if depth == 0 { px(36.) } else { px(24.) };
-        let avatar = Images::get(&comment.user.avatar_thumb, 64, cx);
+        let avatar = Images::get_for(&self.aweme.aweme_id, &comment.user.avatar_thumb, 64, cx);
         let media: Vec<_> = comment
             .media()
             .into_iter()
             .filter(|m| !m.url.is_empty())
-            .map(|m| Images::get(&UrlList { url_list: vec![m.url], ..UrlList::default() }, 320, cx))
+            .map(|m| Images::get_for(&self.aweme.aweme_id, &UrlList { url_list: vec![m.url], ..UrlList::default() }, 320, cx))
             .collect();
         let cid = comment.cid.clone();
         let thread = self.threads.get(&cid);

@@ -5,7 +5,7 @@
 //! notifies whenever an image lands.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,9 @@ pub struct Images {
     io: tokio::runtime::Handle,
     slots: HashMap<String, Slot>,
     condemned: Vec<Arc<RenderImage>>,
+    /// Images asked for on behalf of an owner (a video: its cover, its comments' avatars and
+    /// stickers), kept past the capacity while the owner is held.
+    held: HashMap<String, HashSet<String>>,
 }
 
 struct ImagesGlobal(Entity<Images>);
@@ -41,7 +44,13 @@ impl Global for ImagesGlobal {}
 
 impl Images {
     pub fn init(tiktok: TikTok, io: tokio::runtime::Handle, cx: &mut App) {
-        let images = cx.new(|_| Images { tiktok, io, slots: HashMap::new(), condemned: Vec::new() });
+        let images = cx.new(|_| Images {
+            tiktok,
+            io,
+            slots: HashMap::new(),
+            condemned: Vec::new(),
+            held: HashMap::new(),
+        });
         cx.set_global(ImagesGlobal(images));
     }
 
@@ -54,6 +63,24 @@ impl Images {
         Self::slot(list, max, cx).map(|(image, _)| image)
     }
 
+    /// [`Self::get`], the image kept for `owner` (see [`Self::hold_only`]).
+    pub fn get_for(owner: &str, list: &UrlList, max: u32, cx: &mut App) -> Option<Arc<RenderImage>> {
+        if let Some(key) = key(list, max) {
+            let entity = Self::entity(cx);
+            if !entity.read(cx).held.get(owner).is_some_and(|keys| keys.contains(&key)) {
+                entity.update(cx, |this, _| this.held.entry(owner.to_string()).or_default().insert(key));
+            }
+        }
+        Self::get(list, max, cx)
+    }
+
+    /// Only these owners' images stay past the capacity; the others' go back to taking
+    /// their chances with the rest.
+    pub fn hold_only<'a>(owners: impl IntoIterator<Item = &'a str>, cx: &mut App) {
+        let owners: HashSet<&str> = owners.into_iter().collect();
+        Self::entity(cx).update(cx, |this, _| this.held.retain(|owner, _| owners.contains(owner.as_str())));
+    }
+
     /// The image's colours, once it is loaded.
     pub fn palette(list: &UrlList, max: u32, cx: &mut App) -> Option<Palette> {
         Self::slot(list, max, cx).map(|(_, palette)| palette)
@@ -61,7 +88,7 @@ impl Images {
 
     fn slot(list: &UrlList, max: u32, cx: &mut App) -> Option<(Arc<RenderImage>, Palette)> {
         let urls = candidates(list);
-        let key = format!("{}@{max}", if list.uri.is_empty() { urls.first()?.as_str() } else { &list.uri });
+        let key = key(list, max)?;
         let entity = Self::entity(cx);
         match entity.read(cx).slots.get(&key) {
             Some(Slot::Ready { image, palette, used }) => {
@@ -115,11 +142,14 @@ impl Images {
 }
 
 impl Images {
-    /// Evict the least recently used quarter; free their atlas tiles a moment later.
+    /// Evict the least recently used quarter (of what no held owner keeps); free their
+    /// atlas tiles a moment later.
     fn trim(&mut self, cx: &mut Context<Self>) {
+        let kept: HashSet<&String> = self.held.values().flatten().collect();
         let mut ready: Vec<(Instant, String)> = self
             .slots
             .iter()
+            .filter(|(k, _)| !kept.contains(k))
             .filter_map(|(k, s)| match s {
                 Slot::Ready { used, .. } => Some((used.get(), k.clone())),
                 _ => None,
@@ -148,6 +178,12 @@ impl Images {
             .detach();
         }
     }
+}
+
+/// The cache key of an image at a size: its URI, else its first URL.
+fn key(list: &UrlList, max: u32) -> Option<String> {
+    let id = if list.uri.is_empty() { list.url_list.first()?.clone() } else { list.uri.clone() };
+    Some(format!("{id}@{max}"))
 }
 
 /// HEIC/HEIF through libheif: avatars come only in that format, and the signed
