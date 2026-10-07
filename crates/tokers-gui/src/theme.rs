@@ -67,7 +67,8 @@ impl Theme {
             title_bar_border: rgb(0x262626).into(),
             tint: None,
             tint_secondary: None,
-            radius: px(6.),
+            // Sonora's "rounded" corners
+            radius: px(10.),
             font_size: px(14.),
         }
     }

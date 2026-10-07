@@ -23,7 +23,7 @@ use crate::scrollbar::Scrollbar;
 use crate::state::{CommentsMode, Store, downloads_dir};
 use crate::theme::{ActiveTheme as _, Palette, Text, Theme};
 use crate::ui::{
-    Button, Switch, eyebrow, icon, menu_item, menu_panel, separator, slider, tab_bar, veil, window_controls,
+    Button, Switch, eyebrow, icon, inset_radius, menu_item, menu_panel, separator, slider, tab_bar, veil, window_controls,
     window_frame, window_radius,
 };
 use crate::*;
@@ -571,7 +571,7 @@ impl Root {
                             .relative()
                             .w_full()
                             .h(px(240.))
-                            .rounded(px(8.))
+                            .rounded(theme.radius)
                             .overflow_hidden()
                             .bg(theme.secondary)
                             .border_1()
@@ -589,7 +589,8 @@ impl Root {
                                     .gap_1()
                                     .px_1p5()
                                     .py_0p5()
-                                    .rounded(px(4.))
+                                    // 8 px in from the card's corner
+                                    .rounded(inset_radius(theme.radius, px(8.)).max(px(3.)))
                                     .bg(theme.overlay)
                                     .text_size(theme.text(Text::Tiny))
                                     .text_color(gpui::white())
@@ -921,7 +922,7 @@ fn key_rows(theme: &Theme) -> Vec<AnyElement> {
             .min_w(px(64.))
             .px_2()
             .py_0p5()
-            .rounded(px(4.))
+            .rounded(theme.radius / 2.)
             .bg(theme.secondary)
             .border_1()
             .border_color(theme.border)
@@ -1243,7 +1244,7 @@ impl Render for Root {
                         div()
                             .px_4()
                             .py_2()
-                            .rounded(px(8.))
+                            .rounded(theme.radius)
                             .bg(theme.popover.opacity(0.85))
                             .backdrop_blur(px(8.))
                             .border_1()

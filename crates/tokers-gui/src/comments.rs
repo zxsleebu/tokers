@@ -19,7 +19,7 @@ use crate::media::Images;
 use crate::motion::{Rising as _, Spring, Springs};
 use crate::scrollbar::Scrollbar;
 use crate::theme::{ActiveTheme as _, Text};
-use crate::ui::{Button, compact, icon, skeleton, spinner};
+use crate::ui::{Button, compact, icon, skeleton, spinner, tucked};
 
 const PAGE: u32 = 30;
 /// Avatars and media are fetched ahead for the rows this far below the viewport (a share
@@ -581,7 +581,8 @@ impl CommentsView {
                     .gap_3()
                     .px_3()
                     .py_2()
-                    .rounded(theme.radius)
+                    // inside the menu's padding and border
+                    .rounded(tucked(theme.radius))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.secondary))
                     .text_color(if on { theme.foreground } else { theme.muted_foreground })

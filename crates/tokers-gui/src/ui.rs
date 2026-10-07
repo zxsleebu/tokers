@@ -571,7 +571,8 @@ pub fn tab_bar(items: impl IntoIterator<Item = Button>, theme: &crate::theme::Th
         .border_1()
         .border_color(theme.border)
         .shadow_sm()
-        .children(items.into_iter().map(|item| item.flex_shrink_0().rounded(theme.radius - px(2.))))
+        // concentric corners: the items sit one padding (4 px) inside the bar
+        .children(items.into_iter().map(|item| item.flex_shrink_0().rounded(inset_radius(theme.radius, px(4.)))))
 }
 
 /// How many strips a veil's blur fades in through: a quad each, so more only smooth it.
@@ -597,6 +598,17 @@ pub fn veil(height: Pixels, blur: Pixels, window: &Window) -> Div {
         })
     });
     div().absolute().inset_0().flex().flex_col().children(strips.collect::<Vec<_>>())
+}
+
+/// The radius of a box sitting `inset` inside one rounded by `radius`, so the two curves run
+/// parallel.
+pub fn inset_radius(radius: Pixels, inset: Pixels) -> Pixels {
+    (radius - inset).max(Pixels::ZERO)
+}
+
+/// A row inside a panel's padding (4 px) and border (1 px), as Sonora's menu rows.
+pub fn tucked(radius: Pixels) -> Pixels {
+    inset_radius(radius, px(5.))
 }
 
 /// A dropdown's panel (Sonora's `Menu`).
@@ -627,7 +639,7 @@ pub fn menu_item(id: impl Into<ElementId>, label: impl Into<SharedString>, selec
         .gap_3()
         .px_3()
         .py_1()
-        .rounded(theme.radius - px(2.))
+        .rounded(tucked(theme.radius))
         .cursor_pointer()
         .when(selected, |this| this.bg(theme.secondary_active))
         .hover(move |this| this.bg(theme.secondary_hover))
