@@ -663,6 +663,8 @@ impl CommentsView {
             body = body.child(
                 div()
                     .id(SharedString::from(format!("thread-{cid}")))
+                    // as wide as its words: the empty space beside it is not a button
+                    .self_start()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -701,6 +703,8 @@ impl CommentsView {
                     body = body.child(
                         div()
                             .id(SharedString::from(format!("more-{cid}")))
+                            // as wide as its words: the empty space beside it is not a button
+                            .self_start()
                             .text_size(theme.text(Text::Small))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.muted_foreground)
