@@ -131,6 +131,12 @@ impl Spring {
         }
     }
 
+    /// Counts as at rest this close to the target (in its own units: pixels need less care).
+    pub fn resting_within(mut self, epsilon: f32) -> Self {
+        self.epsilon = epsilon;
+        self
+    }
+
     pub fn set(&mut self, target: f32) {
         if self.settled() {
             self.stepped = Instant::now();

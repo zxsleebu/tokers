@@ -8,14 +8,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Bounds, Context, Entity, EventEmitter, FontWeight, Hsla, ListAlignment, ListScrollEvent,
-    ListState, MouseButton, ObjectFit, Pixels, Render, ScrollWheelEvent, SharedString, Window, anchored,
+    ListState, MouseButton, ObjectFit, Pixels, Render, ScrollWheelEvent, SharedString, Size, SpringConfig,
+    Window, anchored,
     canvas, deferred, div, img, list, point, px,
 };
 use tokers::TikTok;
 use tokers::models::{Aweme, Comment, UrlList};
 
 use crate::media::Images;
-use crate::motion::Rising as _;
+use crate::motion::{Rising as _, Spring, Springs};
 use crate::scrollbar::Scrollbar;
 use crate::theme::{ActiveTheme as _, Text};
 use crate::ui::{Button, compact, icon, skeleton, spinner};
@@ -83,13 +84,36 @@ enum Vote {
 const ROW_LEFT: f32 = 12.;
 const ROW_RIGHT: f32 = 14.;
 
-#[derive(Default)]
+/// How fast a thread's replies unfold and fold back.
+const UNFOLD: SpringConfig = Springs::RESPONSIVE;
+
 struct Thread {
     open: bool,
     items: Vec<Comment>,
     cursor: u64,
     has_more: bool,
     loading: bool,
+    /// Height of the replies on screen, springing toward `natural` (0 when shut): opening,
+    /// a page of replies coming in and shutting all slide instead of jumping.
+    reveal: Spring,
+    /// The replies' own size, as last painted.
+    natural: Rc<Cell<Size<Pixels>>>,
+    laid_width: Pixels,
+}
+
+impl Default for Thread {
+    fn default() -> Self {
+        Thread {
+            open: false,
+            items: Vec::new(),
+            cursor: 0,
+            has_more: true,
+            loading: false,
+            reveal: Spring::new(UNFOLD, 0.).resting_within(0.5),
+            natural: Rc::default(),
+            laid_width: Pixels::ZERO,
+        }
+    }
 }
 
 pub struct CommentsView {
@@ -375,7 +399,7 @@ impl CommentsView {
     }
 
     fn thread(&mut self, cid: &str) -> &mut Thread {
-        self.threads.entry(cid.to_string()).or_insert_with(|| Thread { has_more: true, ..Thread::default() })
+        self.threads.entry(cid.to_string()).or_default()
     }
 
     fn load_replies(&mut self, cid: String, cx: &mut Context<Self>) {
@@ -528,7 +552,7 @@ impl CommentsView {
         .into_any_element()
     }
 
-    fn render_row(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // padding, not margins: the list measures a row by its box
         if self.variant == Variant::Panel && ix == 0 {
             return div().child(self.header(cx)).child(self.title(cx)).into_any_element();
@@ -545,6 +569,20 @@ impl CommentsView {
                 .into_any_element();
         }
         let comment = self.items[self.shown[ix - self.lead()]].clone();
+        if let Some(thread) = self.threads.get_mut(&comment.cid) {
+            let natural = thread.natural.get();
+            let target = if thread.open { f32::from(natural.height) } else { 0. };
+            // a new width (the window resized) rewraps the replies: follow at once, no slide
+            if natural.width != thread.laid_width {
+                let resized = thread.laid_width > Pixels::ZERO;
+                thread.laid_width = natural.width;
+                if resized && thread.open && thread.reveal.settled() {
+                    thread.reveal.snap(target);
+                }
+            }
+            thread.reveal.set(target);
+            thread.reveal.tick(window, cx);
+        }
         div()
             .pl(px(ROW_LEFT))
             .pr(px(ROW_RIGHT))
@@ -697,8 +735,7 @@ impl CommentsView {
             };
             let toggle_id = cid.clone();
             let hover_id = cid.clone();
-            body = body.child(
-                div()
+            let toggle = div()
                     .id(SharedString::from(format!("thread-{cid}")))
                     // as wide as its words: the empty space beside it is not a button
                     .self_start()
@@ -723,13 +760,22 @@ impl CommentsView {
                             this.preload_thread(&hover_id, cx);
                         }
                     }))
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_thread(&toggle_id, cx))),
-            );
-            if let Some(thread) = thread.filter(|t| t.open) {
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_thread(&toggle_id, cx)));
+            // the toggle and its replies as one child of the row: no gap opens before the
+            // replies have any height
+            let mut thread_el = div().flex().flex_col().child(toggle);
+            if let Some(thread) = thread.filter(|t| t.open || t.reveal.value() > 0.) {
                 let rows: Vec<AnyElement> = thread.items.iter().map(|r| self.row(r, 1, cx)).collect();
-                body = body.child(div().flex().flex_col().gap_3().mt_2().children(rows));
+                let mut unfolded = div()
+                    .relative()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .pt_2()
+                    .child(div().flex().flex_col().gap_3().children(rows));
                 if thread.loading {
-                    body = body.child(div().py_1().child(spinner(
+                    unfolded = unfolded.child(div().py_1().child(spinner(
                         SharedString::from(format!("spin-{cid}")),
                         px(14.),
                         theme.muted_foreground,
@@ -737,7 +783,7 @@ impl CommentsView {
                 } else if thread.has_more && !thread.items.is_empty() {
                     let more_id = cid.clone();
                     let left = replies.saturating_sub(thread.items.len() as u64);
-                    body = body.child(
+                    unfolded = unfolded.child(
                         div()
                             .id(SharedString::from(format!("more-{cid}")))
                             // as wide as its words: the empty space beside it is not a button
@@ -756,7 +802,36 @@ impl CommentsView {
                             ),
                     );
                 }
+                // measures the replies for the spring; a change of size asks for the frame
+                // that starts it moving
+                let natural = thread.natural.clone();
+                unfolded = unfolded.child(
+                    canvas(
+                        move |bounds, window, _| {
+                            if natural.replace(bounds.size) != bounds.size {
+                                window.request_animation_frame();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                );
+                let measured = thread.natural.get();
+                let shown = thread.reveal.value();
+                // the spring follows the content's height; the content itself is laid out in
+                // full and clipped, so its rows don't reflow while it unfolds
+                let full = f32::from(measured.height);
+                let share = if full > 0. { (shown / full).clamp(0., 1.) } else { 0. };
+                thread_el = thread_el.child(
+                    div()
+                        .h(px(shown))
+                        .overflow_hidden()
+                        .opacity(share.powf(0.6))
+                        .child(unfolded),
+                );
             }
+            body = body.child(thread_el);
         }
 
         div()
