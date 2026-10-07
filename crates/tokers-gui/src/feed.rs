@@ -1465,6 +1465,7 @@ impl Render for FeedView {
                 .collect();
             root = root.child(
                 div()
+                    .id("actions-column")
                     .absolute()
                     .left(px(actions.x - origin.0))
                     .top(px(actions.y - origin.1))
@@ -1472,7 +1473,13 @@ impl Render for FeedView {
                     .h(px(actions.h))
                     .overflow_hidden()
                     .opacity(1. - sheet_t)
-                    .children(stacks),
+                    .children(stacks)
+                    // the whole column turns the page too, not just the video; once (over the
+                    // video the stage under it would take the same wheel again)
+                    .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.on_wheel(e, window, cx);
+                    })),
             );
         }
 
