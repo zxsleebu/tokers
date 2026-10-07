@@ -1142,13 +1142,14 @@ impl FeedView {
                     .child(
                         div()
                             .relative()
-                            .child(div().rounded_full().border_2().border_color(fg).child(avatar_el(
+                            // no ring: the picture at the size the ring took
+                            .child(avatar_el(
                                 avatar,
-                                px(46.),
+                                px(50.),
                                 &aweme.author.nickname,
                                 theme.secondary,
                                 theme.muted_foreground,
-                            )))
+                            ))
                             .child(
                                 div()
                                     .absolute()
