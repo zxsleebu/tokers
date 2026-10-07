@@ -32,6 +32,9 @@ const SWIPE_COMMIT: f32 = 0.18;
 const GESTURE_GAP: Duration = Duration::from_millis(160);
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
+/// How hard the button faces blur what is behind them.
+const FACE_BLUR: gpui::Pixels = px(10.);
+
 pub const COVER_PX: u32 = 720;
 
 pub enum FeedEvent {
@@ -633,6 +636,12 @@ impl FeedView {
         let face_hover = mix(gpui::black().opacity(0.32), theme.secondary_active, beside);
         let label = mix(gpui::white(), theme.muted_foreground, beside);
         let ring = theme.border.opacity(theme.border.a * beside);
+        // over the picture the counts need a shadow to stay readable on light frames
+        let shadow = gpui::TextShadow {
+            color: gpui::black().opacity(0.6 * (1. - beside)),
+            offset: gpui::point(px(0.), px(1.)),
+            blur: px(3.),
+        };
         let pop = |what: &str| self.pops.get(what).filter(|(pid, _)| *pid == id).map(|(_, n)| *n);
 
         let button =
@@ -645,6 +654,7 @@ impl FeedView {
                     .items_center()
                     .justify_center()
                     .bg(face_bg)
+                    .backdrop_blur(FACE_BLUR)
                     .border_1()
                     .border_color(ring)
                     .hover(move |s| s.bg(face_hover))
@@ -667,6 +677,7 @@ impl FeedView {
                         .text_size(theme.text(Text::Tiny))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(label)
+                        .when(beside < 0.999, |el| el.text_shadow([shadow]))
                         .child(count),
                 )
             };
