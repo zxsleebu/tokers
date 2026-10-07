@@ -27,6 +27,8 @@ const PAGE: u32 = 30;
 const PRELOAD_SHARE: f32 = 0.5;
 /// ...counting a row as short as this, so none in that stretch is missed.
 const ROW_MIN: f32 = 56.;
+/// The same for a reply.
+const REPLY_MIN: f32 = 44.;
 /// Fetch the next page when the last loaded comment is this many rows away.
 const PREFETCH_ROWS: usize = 8;
 /// Resting on "Ответы" this long fetches the replies before the click (passing over doesn't).
@@ -100,6 +102,9 @@ struct Thread {
     reveal: Spring,
     /// The replies' own size, as last painted.
     natural: Rc<Cell<Size<Pixels>>>,
+    /// Room the replies would fill once opened, from the toggle down to half a viewport
+    /// past the bottom: their images are fetched for that many as soon as they arrive.
+    ahead: f32,
     laid_width: Pixels,
 }
 
@@ -114,6 +119,7 @@ impl Default for Thread {
             reveal: Spring::new(UNFOLD, 0.).resting_within(0.5),
             natural: Rc::default(),
             laid_width: Pixels::ZERO,
+            ahead: 0.,
         }
     }
 }
@@ -305,14 +311,21 @@ impl CommentsView {
         let wanted: Vec<(UrlList, u32)> = (from..to)
             .flat_map(|ix| {
                 let comment = &self.items[self.shown[ix - self.lead()]];
-                let media = comment
-                    .media()
-                    .into_iter()
-                    .filter(|m| !m.url.is_empty())
-                    .map(|m| (UrlList { url_list: vec![m.url], ..UrlList::default() }, 320));
-                std::iter::once((comment.user.avatar_thumb.clone(), 64)).chain(media).collect::<Vec<_>>()
+                // an open thread's replies are part of its row
+                let replies = self.threads.get(&comment.cid).filter(|t| t.open).map_or(&[][..], |t| &t.items[..]);
+                std::iter::once(comment).chain(replies.iter().take(rows)).flat_map(images_of).collect::<Vec<_>>()
             })
             .collect();
+        for (list, size) in wanted {
+            Images::get(&list, size, cx);
+        }
+    }
+
+    /// Images of the replies that would fill the thread's room once it opens.
+    fn preload_replies(&mut self, cid: &str, cx: &mut Context<Self>) {
+        let Some(thread) = self.threads.get(cid) else { return };
+        let count = (thread.ahead / REPLY_MIN).ceil() as usize;
+        let wanted: Vec<_> = thread.items.iter().take(count).flat_map(images_of).collect();
         for (list, size) in wanted {
             Images::get(&list, size, cx);
         }
@@ -388,21 +401,28 @@ impl CommentsView {
 
     /// Resting on "Ответы" (or pressing it) fetches the first page, so the click opens it
     /// with the replies in.
-    fn preload_thread(&mut self, cid: &str, cx: &mut Context<Self>) {
+    /// `at`: where the toggle is (the pointer on it), for how many replies would show.
+    fn preload_thread(&mut self, cid: &str, at: Pixels, cx: &mut Context<Self>) {
         self.dwell = None;
-        if self.thread(cid).items.is_empty() {
+        let bottom = self.list.viewport_bounds().bottom();
+        let ahead = f32::from(bottom - at).max(0.) + self.viewport_h * PRELOAD_SHARE;
+        let thread = self.thread(cid);
+        thread.ahead = thread.ahead.max(ahead);
+        if thread.items.is_empty() {
             self.load_replies(cid.to_string(), cx);
+        } else {
+            self.preload_replies(cid, cx);
         }
     }
 
-    fn dwell_on_thread(&mut self, cid: String, hovered: bool, cx: &mut Context<Self>) {
+    fn dwell_on_thread(&mut self, cid: String, hovered: bool, at: Pixels, cx: &mut Context<Self>) {
         if !hovered {
             self.dwell = None;
             return;
         }
         self.dwell = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(THREAD_DWELL).await;
-            this.update(cx, |this, cx| this.preload_thread(&cid, cx)).ok();
+            this.update(cx, |this, cx| this.preload_thread(&cid, at, cx)).ok();
         }));
     }
 
@@ -436,10 +456,12 @@ impl CommentsView {
         cx.spawn(async move |this, cx| {
             let page = job.await.ok().and_then(|r| r.ok()).filter(|p| p.status.is_ok());
             this.update(cx, |this, cx| {
+                let mut first = false;
                 if let Some(thread) = this.threads.get_mut(&cid) {
                     thread.loading = false;
                     match page {
                         Some(page) => {
+                            first = thread.items.is_empty();
                             thread.items.extend(page.comments);
                             thread.cursor = page.cursor;
                             thread.has_more = page.has_more;
@@ -451,6 +473,9 @@ impl CommentsView {
                     {
                         this.remeasure(ix);
                     }
+                }
+                if first {
+                    this.preload_replies(&cid, cx);
                 }
                 cx.notify();
             })
@@ -774,12 +799,14 @@ impl CommentsView {
                             .size(px(14.))
                             .text_color(theme.muted_foreground),
                     )
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        this.dwell_on_thread(hover_id.clone(), *hovered, cx)
+                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                        this.dwell_on_thread(hover_id.clone(), *hovered, window.mouse_position().y, cx)
                     }))
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| this.preload_thread(&press_id, cx)),
+                        cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
+                            this.preload_thread(&press_id, e.position.y, cx)
+                        }),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_thread(&toggle_id, cx)));
             // the toggle and its replies as one child of the row: no gap opens before the
@@ -1066,6 +1093,17 @@ impl Render for CommentsView {
                     .child(self.scrollbar.clone()),
             )
     }
+}
+
+/// What a comment shows that has to be fetched: its author's avatar and its media, with the
+/// sizes the rows ask for.
+fn images_of(comment: &Comment) -> Vec<(UrlList, u32)> {
+    let media = comment
+        .media()
+        .into_iter()
+        .filter(|m| !m.url.is_empty())
+        .map(|m| (UrlList { url_list: vec![m.url], ..UrlList::default() }, 320));
+    std::iter::once((comment.user.avatar_thumb.clone(), 64)).chain(media).collect()
 }
 
 pub fn avatar_el(
