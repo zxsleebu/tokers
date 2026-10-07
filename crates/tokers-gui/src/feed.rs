@@ -35,11 +35,13 @@ const SWIPE_COMMIT: f32 = 0.18;
 const GESTURE_GAP: Duration = Duration::from_millis(160);
 /// The comments panel has no background of its own: the glow fades into the dark there.
 /// The fade starts this far left of the panel's edge...
-const VEIL_LEAD: f32 = 24.;
-/// ...runs this wide...
-const VEIL_FADE: f32 = 120.;
+const VEIL_LEAD: f32 = 56.;
+/// ...runs over this share of the panel (past the lead)...
+const VEIL_REACH: f32 = 0.6;
 /// ...and ends this dark (share of the window background), with a trace of the glow left.
-const VEIL_DIM: f32 = 0.88;
+const VEIL_DIM: f32 = 0.85;
+/// The fade is eased (gradients are linear, two stops): drawn in this many linear pieces.
+const VEIL_STEPS: usize = 12;
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
 /// Light under a glyph or count (see `Glimpse::light_in`) where its shadow starts...
@@ -1390,19 +1392,29 @@ impl Render for FeedView {
         });
         let mut root = div().size_full().relative().children(glow).child(stage);
         if let Some(panel) = closed.comments_panel {
-            let dark = |alpha: f32| theme.background.opacity(alpha * VEIL_DIM * wt);
-            let from = panel.x - origin.0 - VEIL_LEAD;
+            // a linear ramp shows a hard edge at both ends; smootherstep sets off and lands softly
+            let dark = |t: f32| {
+                let t = t.clamp(0., 1.);
+                let eased = t * t * t * (t * (t * 6. - 15.) + 10.);
+                theme.background.opacity(eased * VEIL_DIM * wt)
+            };
+            // whole pixels, so the pieces meet without a seam
+            let from = (panel.x - origin.0 - VEIL_LEAD).round();
+            let step = ((VEIL_LEAD + panel.w * VEIL_REACH) / VEIL_STEPS as f32).round().max(1.);
+            let pieces = (0..VEIL_STEPS).map(|i| {
+                let (t0, t1) = (i as f32 / VEIL_STEPS as f32, (i + 1) as f32 / VEIL_STEPS as f32);
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(from + i as f32 * step))
+                    .w(px(step))
+                    .bg(linear_gradient(90., linear_color_stop(dark(t0), 0.), linear_color_stop(dark(t1), 1.)))
+            });
+            let rest = from + VEIL_STEPS as f32 * step;
             root = root
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left(px(from))
-                        .w(px(VEIL_FADE))
-                        .bg(linear_gradient(90., linear_color_stop(dark(0.), 0.), linear_color_stop(dark(1.), 1.))),
-                )
-                .child(div().absolute().top_0().bottom_0().right_0().left(px(from + VEIL_FADE)).bg(dark(1.)));
+                .children(pieces)
+                .child(div().absolute().top_0().bottom_0().right_0().left(px(rest)).bg(dark(1.)));
         }
 
         self.lens.tick(window, cx);
