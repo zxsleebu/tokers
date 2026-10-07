@@ -130,7 +130,9 @@ impl CommentsView {
                 cx.notify();
             }
             if e.visible_range.end + PREFETCH_ROWS >= this.row_count() {
-                this.load_more(cx);
+                // The list calls this while it holds its own state, and loading touches the
+                // list (the footer is remeasured): load once it has let go.
+                cx.spawn(async move |this, cx| this.update(cx, |this, cx| this.load_more(cx)).ok()).detach();
             }
         }));
         let mut this = CommentsView {
