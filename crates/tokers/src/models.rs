@@ -262,9 +262,31 @@ pub struct Aweme {
     pub music: Music,
     #[serde(deserialize_with = "de::nullable")]
     pub video: Video,
+    /// Photo posts: the images; `video.play_addr` is then the soundtrack.
+    #[serde(deserialize_with = "de::nullable")]
+    pub image_post_info: ImagePostInfo,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImagePostInfo {
+    #[serde(deserialize_with = "de::nullable")]
+    pub images: Vec<PostImage>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PostImage {
+    #[serde(deserialize_with = "de::nullable")]
+    pub display_image: UrlList,
 }
 
 impl Aweme {
+    /// A photo post (slideshow) rather than a video.
+    pub fn is_photo(&self) -> bool {
+        !self.image_post_info.images.is_empty()
+    }
+
     /// Hashtags from `cha_list`, then any extra ones from `text_extra`, deduplicated.
     pub fn hashtags(&self) -> Vec<&str> {
         let mut tags: Vec<&str> =

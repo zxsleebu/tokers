@@ -26,7 +26,10 @@ cargo run -p tokers-gui        # the app (unsigned)
 cargo test
 ```
 
-Linux build dependencies (gpui): wayland, libxkbcommon, xcb, fontconfig, freetype, vulkan loader.
+Linux build dependencies:
+- gpui: wayland, libxkbcommon, xcb, fontconfig, freetype, vulkan loader;
+- video: GStreamer 1.22+ with gst-plugins-base/good and gst-libav (or VA-API) for H.264/H.265;
+- images: libheif (avatars are served as HEIC only).
 
 ## Library
 

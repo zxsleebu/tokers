@@ -5,17 +5,14 @@ members = ["crates/tokers", "crates/tokers-gui"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 tokers = { path = "crates/tokers" }
-tokers-gui = { path = "crates/tokers-gui" }
 
 gpui = { git = "https://github.com/nolight132/gpui", rev = "5ff26c7dedb1c8e27b69f89be13ce2744484874a" }
 gpui_platform = { git = "https://github.com/nolight132/gpui", rev = "5ff26c7dedb1c8e27b69f89be13ce2744484874a", features = ["font-kit", "wayland", "x11"] }
-
-anyhow = "1"
 flate2 = "1"
 form_urlencoded = "1"
 rand = "0.9"
@@ -33,3 +30,8 @@ wreq-util = "3.0.0-rc.14"
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 calloop = { git = "https://github.com/zed-industries/calloop" }
+
+# gpui, the decoders and the image crate are unusably slow unoptimised; our own
+# crates stay at opt-level 0 for fast rebuilds.
+[profile.dev.package."*"]
+opt-level = 2
