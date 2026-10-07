@@ -673,6 +673,10 @@ impl FeedView {
 
         let accent = theme.primary;
         div()
+            .id(SharedString::from(format!("buttons-{id}")))
+            // over the video, a click is for the button, not the play toggle under it;
+            // the wheel still pages
+            .block_mouse_except_scroll()
             .flex()
             .flex_col()
             .items_center()
