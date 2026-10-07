@@ -197,6 +197,8 @@ pub struct FeedView {
     pub sidebar: bool,
     viewport: Size<Pixels>,
     current_since: Instant,
+    /// The video `current_since` counts from.
+    current_id: Option<String>,
     /// The overlay caption shows its whole description.
     desc_open: bool,
     /// Window scale factor at the last render.
@@ -277,6 +279,7 @@ impl FeedView {
             sidebar: true,
             viewport: size(px(720.), px(1280.)),
             current_since: Instant::now(),
+            current_id: None,
             desc_open: false,
             scale: 1.,
             leaving: None,
@@ -376,9 +379,12 @@ impl FeedView {
             cx.observe(&player, |_, _, cx| cx.notify()).detach();
             self.players.insert(id.clone(), player);
         }
-        if self.comments.as_ref().map(|c| c.read(cx).aweme_id().to_string())
-            != self.current().map(|a| a.aweme_id.clone())
-        {
+        // a new current video: its comments start over. (Comparing with the comments view
+        // alone restarted the wait on every call while there was none yet, and with calls
+        // coming often enough the comments never came.)
+        let current = self.current().map(|a| a.aweme_id.clone());
+        if current != self.current_id {
+            self.current_id = current;
             self.comments = None;
             self.current_since = Instant::now();
         }
@@ -389,29 +395,16 @@ impl FeedView {
 
     /// Comments of the current video, created once they are on screen and the
     /// video has stayed current a moment (paging through doesn't fetch each one).
-    fn ensure_comments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The current video's comments: the view at once (the video's own author, description
+    /// and sound show straight away), the first page only once the video has stayed current
+    /// a moment, so paging through doesn't fetch each one.
+    fn ensure_comments(&mut self, cx: &mut Context<Self>) {
         if self.comments.is_some() {
             return;
         }
         let Some(aweme) = self.current().cloned() else { return };
         let wait = COMMENTS_DELAY.saturating_sub(self.current_since.elapsed());
-        if !wait.is_zero() {
-            // create them when the wait is over, not on whatever render comes next: a paused
-            // or still loading video may not render again
-            cx.spawn_in(window, async move |this, cx| {
-                cx.background_executor().timer(wait).await;
-                this.update_in(cx, |this, window, cx| {
-                    if this.mode == Some(Mode::Wide) || this.sheet_open {
-                        this.ensure_comments(window, cx);
-                    }
-                    cx.notify();
-                })
-                .ok();
-            })
-            .detach();
-            return;
-        }
-        let view = cx.new(|cx| CommentsView::new(self.tiktok.clone(), self.io.clone(), aweme, cx));
+        let view = cx.new(|cx| CommentsView::new(self.tiktok.clone(), self.io.clone(), aweme, wait, cx));
         cx.subscribe(&view, |this, _, event, cx| match event {
             CommentsEvent::Close => this.close_comments(cx),
         })
@@ -1189,7 +1182,7 @@ impl Render for FeedView {
             self.sheet.snap(0.);
         }
         if closed.mode == Mode::Wide || self.sheet_open {
-            self.ensure_comments(window, cx);
+            self.ensure_comments(cx);
         }
         let origin = (closed.content.x, TITLEBAR);
         let column = lerp_rect(closed.video, open.video, sheet_t);

@@ -104,6 +104,8 @@ pub struct CommentsView {
     desc_open: bool,
     variant: Variant,
     votes: HashMap<String, Vote>,
+    /// The first page is not asked for yet (see `new`): the rows show as loading.
+    waiting: bool,
     order: Order,
     /// The rows: indices into `items` in the order and under the filter chosen.
     shown: Vec<usize>,
@@ -117,7 +119,16 @@ pub struct CommentsView {
 impl EventEmitter<CommentsEvent> for CommentsView {}
 
 impl CommentsView {
-    pub fn new(tiktok: TikTok, io: tokio::runtime::Handle, aweme: Aweme, cx: &mut Context<Self>) -> Self {
+    /// `fetch_after`: how long to wait before asking for the first page (paging past a video
+    /// drops its view, and the request with it, before it goes out). Everything the video
+    /// itself carries (author, description, sound) shows at once.
+    pub fn new(
+        tiktok: TikTok,
+        io: tokio::runtime::Handle,
+        aweme: Aweme,
+        fetch_after: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&Images::entity(cx), |_, _, cx| cx.notify()).detach();
         let total = aweme.statistics.comment_count;
         let list = ListState::new(2, ListAlignment::Top, px(400.));
@@ -151,13 +162,27 @@ impl CommentsView {
             desc_open: false,
             variant: Variant::Panel,
             votes: HashMap::new(),
+            waiting: false,
             order: Order::Top,
             shown: Vec::new(),
             filter_pages: 0,
             sort_open: false,
             title_at: Rc::default(),
         };
-        this.load_more(cx);
+        if fetch_after.is_zero() {
+            this.load_more(cx);
+        } else {
+            this.waiting = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(fetch_after).await;
+                this.update(cx, |this, cx| {
+                    this.waiting = false;
+                    this.load_more(cx);
+                })
+                .ok();
+            })
+            .detach();
+        }
         this
     }
 
@@ -771,7 +796,7 @@ impl CommentsView {
 impl CommentsView {
     fn footer(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
-        if self.loading && self.items.is_empty() {
+        if (self.loading || self.waiting) && self.items.is_empty() {
             div()
                 .flex()
                 .flex_col()
