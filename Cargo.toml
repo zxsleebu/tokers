@@ -11,8 +11,8 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 tokers = { path = "crates/tokers" }
 
-gpui = { git = "https://github.com/zxsleebu/gpui", rev = "124fcfb853466ae2adaf2539254872a7e7a0dc07" }
-gpui_platform = { git = "https://github.com/zxsleebu/gpui", rev = "124fcfb853466ae2adaf2539254872a7e7a0dc07", features = ["font-kit", "wayland", "x11"] }
+gpui = { git = "https://github.com/zxsleebu/gpui", rev = "d8312f3e6e2943535e386db54f873acfb8fbdccb" }
+gpui_platform = { git = "https://github.com/zxsleebu/gpui", rev = "d8312f3e6e2943535e386db54f873acfb8fbdccb", features = ["font-kit", "wayland", "x11"] }
 flate2 = "1"
 form_urlencoded = "1"
 log = "0.4"
