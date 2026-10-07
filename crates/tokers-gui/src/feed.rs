@@ -33,6 +33,13 @@ const WHEEL_COOLDOWN: Duration = Duration::from_millis(260);
 /// Touchpad: how far (share of the video height) a swipe goes before it turns the page.
 const SWIPE_COMMIT: f32 = 0.18;
 const GESTURE_GAP: Duration = Duration::from_millis(160);
+/// The comments panel has no background of its own: the glow fades into the dark there.
+/// The fade starts this far left of the panel's edge...
+const VEIL_LEAD: f32 = 24.;
+/// ...runs this wide...
+const VEIL_FADE: f32 = 120.;
+/// ...and ends this dark (share of the window background), with a trace of the glow left.
+const VEIL_DIM: f32 = 0.88;
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
 /// Light under a glyph or count (see `Glimpse::light_in`) where its shadow starts...
@@ -1382,6 +1389,21 @@ impl Render for FeedView {
             )
         });
         let mut root = div().size_full().relative().children(glow).child(stage);
+        if let Some(panel) = closed.comments_panel {
+            let dark = |alpha: f32| theme.background.opacity(alpha * VEIL_DIM * wt);
+            let from = panel.x - origin.0 - VEIL_LEAD;
+            root = root
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(from))
+                        .w(px(VEIL_FADE))
+                        .bg(linear_gradient(90., linear_color_stop(dark(0.), 0.), linear_color_stop(dark(1.), 1.))),
+                )
+                .child(div().absolute().top_0().bottom_0().right_0().left(px(from + VEIL_FADE)).bg(dark(1.)));
+        }
 
         self.lens.tick(window, cx);
         let picture = frame.map(|f| (fitted(f.w as f32 / f.h as f32), f));
@@ -1444,9 +1466,6 @@ impl Render for FeedView {
                     .top(px(panel.y - origin.1))
                     .w(px(panel.w))
                     .h(px(panel.h))
-                    .bg(theme.background.opacity(0.35))
-                    .border_l_1()
-                    .border_color(theme.border)
                     .child(body),
             );
         }
