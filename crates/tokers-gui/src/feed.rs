@@ -34,8 +34,9 @@ const WHEEL_COOLDOWN: Duration = Duration::from_millis(260);
 const SWIPE_COMMIT: f32 = 0.18;
 const GESTURE_GAP: Duration = Duration::from_millis(160);
 /// The comments panel has no background of its own: the glow beside the video dies out
-/// this far into it (px), on its own curve, rather than lying under the text.
-const GLOW_INTO_PANEL: f32 = 24.;
+/// this far into it (px, negative: short of it), on its own curve, rather than lying under
+/// the text. The glow's blur still carries a little of it a few cells past that point.
+const GLOW_INTO_PANEL: f32 = -16.;
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
 /// Light under a glyph or count (see `Glimpse::light_in`) where its shadow starts...
