@@ -121,8 +121,10 @@ const SETTINGS_WIDTH: f32 = 640.;
 const SETTINGS_HEADER: f32 = 84.;
 /// How far the rows are blurred where they pass under the header (Sonora's `HEADER_BLUR`).
 const SETTINGS_HEADER_BLUR: Pixels = px(1.);
-/// How far past the header the rows keep dissolving, so they leave no hard edge under it.
-const SETTINGS_FADE_TAIL: f32 = 48.;
+/// The rows dissolve from the window's edge to this far past the top of the category bar, so
+/// under the bar they are still about half there and its glass has something to frost (Sonora's
+/// taller header puts its bar about as far into its fade).
+const SETTINGS_FADE: f32 = 24. + 48.;
 /// A dropdown's width (Sonora's `Picker::NARROW` and `REGULAR`).
 const PICKER_NARROW: f32 = 170.;
 const PICKER_REGULAR: f32 = 190.;
@@ -674,7 +676,7 @@ impl Root {
                     .track_scroll(&self.settings_scroll)
                     .on_scroll_wheel(move |e, window, cx| wheel.update(cx, |b, cx| b.wheel(e, window, cx)))
                     // the rows dissolve over the header's height as they pass under it
-                    .fade_edges(px(SETTINGS_HEADER + SETTINGS_FADE_TAIL), px(0.))
+                    .fade_edges(px(SETTINGS_FADE), px(0.))
                     .flex()
                     .flex_col()
                     .items_center()
