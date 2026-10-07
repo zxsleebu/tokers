@@ -4,6 +4,7 @@
 mod ambient;
 mod ambilight;
 mod assets;
+mod clips;
 mod comments;
 mod feed;
 mod glide;

@@ -18,6 +18,7 @@ use tokers::endpoints::Feed;
 use tokers::models::Aweme;
 
 use crate::ambilight::Ambilight;
+use crate::clips::Clips;
 use crate::comments::{CommentsEvent, CommentsView, Variant, avatar_el, is_long, more_toggle, rich};
 use crate::layout::{Layout, Mode, Rect, TITLEBAR};
 use crate::media::Images;
@@ -226,6 +227,8 @@ pub struct FeedView {
     recent: VecDeque<String>,
     /// Fetches the comments ahead once the current video has stayed a moment.
     comments_ahead: Option<Task<()>>,
+    /// Video files of the same videos the comments are kept for.
+    clips: Clips,
     /// The overlay caption shows its whole description.
     desc_open: bool,
     /// Window scale factor at the last render.
@@ -310,6 +313,7 @@ impl FeedView {
             comment_views: HashMap::new(),
             recent: VecDeque::new(),
             comments_ahead: None,
+            clips: Clips::new(),
             desc_open: false,
             scale: 1.,
             leaving: None,
@@ -368,6 +372,7 @@ impl FeedView {
 
     /// Keep players for the current video (playing) and the next (prerolled, paused).
     fn sync_players(&mut self, cx: &mut Context<Self>) {
+        self.fetch_clips(cx);
         let mut keep: Vec<String> = [self.index, self.index + 1]
             .iter()
             .filter_map(|&i| self.items.get(i))
@@ -399,7 +404,15 @@ impl FeedView {
                 continue;
             }
             let Some(aweme) = self.items.iter().find(|a| &a.aweme_id == id) else { continue };
-            let Some(uri) = aweme.video.play_addr.first().map(str::to_string) else { continue };
+            let cached = self.clips.uri(id);
+            // the next clip waits for its file rather than stream alongside the download;
+            // the current one can't wait
+            if cached.is_none() && slot != 0 && !leaving && self.clips.fetching(id) {
+                continue;
+            }
+            let Some(uri) = cached.or_else(|| aweme.video.play_addr.first().map(str::to_string)) else {
+                continue;
+            };
             let photo = aweme.is_photo();
             let player = cx.new(|cx| {
                 let mut p = VideoPlayer::new(&uri, max_height, play, prefs.volume as f64, prefs.muted, cx);
@@ -489,9 +502,45 @@ impl FeedView {
         self.recent.iter().cloned().chain(ahead).collect()
     }
 
+    /// Files of the current clip and the ones ahead, fetched whole: the player opens them
+    /// from disk, now or when the video is come back to.
+    fn fetch_clips(&mut self, cx: &mut Context<Self>) {
+        let ahead: Vec<Aweme> = self.items.iter().skip(self.index).take(1 + COMMENTS_AHEAD).cloned().collect();
+        for aweme in ahead {
+            let Some(url) = aweme.video.play_addr.first().map(str::to_string) else { continue };
+            let id = aweme.aweme_id.clone();
+            let Some(path) = self.clips.begin(&id) else { continue };
+            let transport = self.tiktok.transport().clone();
+            let job = self.io.spawn(async move {
+                let resp = transport.get(&url, &[], None, false).await.ok()?;
+                if resp.status != 200 || resp.body.is_empty() {
+                    return None;
+                }
+                std::fs::create_dir_all(path.parent()?).ok()?;
+                // whole or not at all: the player never opens half a file
+                let part = path.with_extension("part");
+                std::fs::write(&part, resp.body).ok()?;
+                std::fs::rename(&part, &path).ok()?;
+                Some(path)
+            });
+            cx.spawn(async move |this, cx| {
+                let path = job.await.ok().flatten();
+                this.update(cx, |this, cx| {
+                    this.clips.finish(&id, path);
+                    // the next clip's player was waiting for it
+                    this.sync_players(cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
     fn keep_only_recent(&mut self, cx: &mut Context<Self>) {
         let kept = self.kept_ids();
         self.comment_views.retain(|id, _| kept.contains(id));
+        self.clips.retain(&kept);
         Images::hold_only(kept.iter().map(String::as_str), cx);
     }
 

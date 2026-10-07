@@ -179,6 +179,11 @@ fn library_path() -> PathBuf {
     dir("XDG_DATA_HOME", ".local/share").join("library.json")
 }
 
+/// Caches that can go at any time (`$XDG_CACHE_HOME/tokers`).
+pub fn cache_dir() -> PathBuf {
+    dir("XDG_CACHE_HOME", ".cache")
+}
+
 /// Where downloaded videos go.
 pub fn downloads_dir() -> PathBuf {
     std::env::var_os("XDG_DOWNLOAD_DIR")
