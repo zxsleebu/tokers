@@ -21,6 +21,11 @@ use crate::theme::{ActiveTheme as _, Text};
 use crate::ui::{Button, compact, icon, skeleton, spinner};
 
 const PAGE: u32 = 30;
+/// Avatars and media are fetched ahead for the rows this far below the viewport (a share
+/// of its height)...
+const PRELOAD_SHARE: f32 = 0.5;
+/// ...counting a row as short as this, so none in that stretch is missed.
+const ROW_MIN: f32 = 56.;
 /// Fetch the next page when the last loaded comment is this many rows away.
 const PREFETCH_ROWS: usize = 8;
 
@@ -106,6 +111,10 @@ pub struct CommentsView {
     votes: HashMap<String, Vote>,
     /// The first page is not asked for yet (see `new`): the rows show as loading.
     waiting: bool,
+    /// The row past the last one in view, as the list last reported.
+    seen_end: usize,
+    /// The list's height at the last render (the list can't be asked while it scrolls).
+    viewport_h: f32,
     order: Order,
     /// The rows: indices into `items` in the order and under the filter chosen.
     shown: Vec<usize>,
@@ -140,6 +149,8 @@ impl CommentsView {
                 this.sort_open = false;
                 cx.notify();
             }
+            this.seen_end = e.visible_range.end;
+            this.preload_below(cx);
             if e.visible_range.end + PREFETCH_ROWS >= this.row_count() {
                 // The list calls this while it holds its own state, and loading touches the
                 // list (the footer is remeasured): load once it has let go.
@@ -163,6 +174,8 @@ impl CommentsView {
             variant: Variant::Panel,
             votes: HashMap::new(),
             waiting: false,
+            seen_end: 0,
+            viewport_h: 600.,
             order: Order::Top,
             shown: Vec::new(),
             filter_pages: 0,
@@ -254,6 +267,28 @@ impl CommentsView {
         self.list.remeasure_items(ix..ix + 1);
     }
 
+    /// Starts fetching the avatars and media of the rows within [`PRELOAD_SHARE`] of a
+    /// viewport below the visible ones, so they are in by the time they scroll into view.
+    fn preload_below(&mut self, cx: &mut Context<Self>) {
+        let from = self.seen_end.max(self.lead());
+        let rows = (self.viewport_h * PRELOAD_SHARE / ROW_MIN).ceil() as usize;
+        let to = (from + rows).min(self.footer_ix());
+        let wanted: Vec<(UrlList, u32)> = (from..to)
+            .flat_map(|ix| {
+                let comment = &self.items[self.shown[ix - self.lead()]];
+                let media = comment
+                    .media()
+                    .into_iter()
+                    .filter(|m| !m.url.is_empty())
+                    .map(|m| (UrlList { url_list: vec![m.url], ..UrlList::default() }, 320));
+                std::iter::once((comment.user.avatar_thumb.clone(), 64)).chain(media).collect::<Vec<_>>()
+            })
+            .collect();
+        for (list, size) in wanted {
+            Images::get(&list, size, cx);
+        }
+    }
+
     fn comment_ix(&self, cid: &str) -> Option<usize> {
         self.shown.iter().position(|&i| self.items[i].cid == cid).map(|i| i + self.lead())
     }
@@ -294,6 +329,8 @@ impl CommentsView {
                             this.arrange();
                             this.fill_filter(cx);
                         }
+                        // the new rows below the view get their pictures ahead
+                        this.preload_below(cx);
                     }
                     Err(e) => {
                         this.error = Some(e.into());
@@ -895,6 +932,10 @@ impl Render for CommentsView {
             self.list.reset(self.row_count());
         }
         self.scrollbar.read(cx).sync();
+        let height = f32::from(self.list.viewport_bounds().size.height);
+        if height > 0. {
+            self.viewport_h = height;
+        }
         let bar = self.scrollbar.clone();
         div()
             .id("comments")
