@@ -62,6 +62,12 @@ impl Order {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortFrom {
+    Title,
+    Button,
+}
+
 /// A filter fetches on its own until it shows this many comments...
 const FILTER_FILL: usize = 12;
 /// ...or has gone through this many pages since it was picked.
@@ -110,8 +116,11 @@ pub struct CommentsView {
     /// Pages a filter has fetched by itself since it was picked.
     filter_pages: u32,
     sort_open: bool,
-    /// Where the sort button was painted (the menu hangs under it).
-    sort_anchor: Rc<Cell<Bounds<Pixels>>>,
+    /// What opened the menu, which it hangs under.
+    sort_from: SortFrom,
+    /// Where the title (always a way to the menu) and, on the sheet, the sort button were painted.
+    title_at: Rc<Cell<Bounds<Pixels>>>,
+    button_at: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl EventEmitter<CommentsEvent> for CommentsView {}
@@ -155,7 +164,9 @@ impl CommentsView {
             shown: Vec::new(),
             filter_pages: 0,
             sort_open: false,
-            sort_anchor: Rc::default(),
+            sort_from: SortFrom::Title,
+            title_at: Rc::default(),
+            button_at: Rc::default(),
         };
         this.load_more(cx);
         this
@@ -359,29 +370,63 @@ impl CommentsView {
         .detach();
     }
 
-    /// "Комментарии N" and the sort button, centred; the close button on the right of the sheet.
+    /// "Комментарии N", which opens the order menu: on the left of the panel, with the menu's
+    /// icon after it; centred on the sheet, with the sort button on the left and the close
+    /// button on the right.
     fn title(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
-        let anchor = self.sort_anchor.clone();
+        let sheet = self.variant == Variant::Sheet;
         let sorted = self.order != Order::Top;
+        let toggle = |from: SortFrom| {
+            cx.listener(move |this: &mut Self, _: &gpui::ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.sort_open = !(this.sort_open && this.sort_from == from);
+                this.sort_from = from;
+                cx.notify();
+            })
+        };
+        let marker = |cell: &Rc<Cell<Bounds<Pixels>>>| {
+            let cell = cell.clone();
+            canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {}).absolute().inset_0()
+        };
+        let label = div()
+            .id("comments-title")
+            .relative()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.secondary_hover))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child("Комментарии")
+            .child(div().ml_1().text_color(theme.muted_foreground).child(compact(self.total)))
+            .when(!sheet, |el| {
+                el.child(div().ml_1().child(
+                    icon("icons/list-filter.svg").size(px(16.)).text_color(if sorted {
+                        theme.primary
+                    } else {
+                        theme.muted_foreground
+                    }),
+                ))
+            })
+            .child(marker(&self.title_at))
+            .on_click(toggle(SortFrom::Title));
         div()
             .relative()
             .flex()
             .items_center()
-            .justify_center()
-            .px_5()
+            .when(sheet, |el| el.justify_center())
+            .px(px(ROW_LEFT - 8.))
             .h(px(44.))
             .border_b_1()
             .border_color(theme.border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Комментарии")
-                    .child(div().ml_1().text_color(theme.muted_foreground).child(compact(self.total)))
-                    .child(
+            .child(label)
+            .when(sheet, |el| {
+                el.child(
+                    div().absolute().left(px(ROW_LEFT)).top_0().bottom_0().flex().items_center().child(
                         div()
                             .relative()
                             .child(
@@ -389,21 +434,12 @@ impl CommentsView {
                                     .icon("icons/list-filter.svg")
                                     .small()
                                     .when(sorted, |b| b.secondary())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.sort_open = !this.sort_open;
-                                        cx.notify();
-                                    })),
+                                    .on_click(toggle(SortFrom::Button)),
                             )
-                            .child(
-                                canvas(move |bounds, _, _| anchor.set(bounds), |_, _, _, _| {})
-                                    .absolute()
-                                    .inset_0(),
-                            ),
+                            .child(marker(&self.button_at)),
                     ),
-            )
-            .when(self.variant == Variant::Sheet, |el| {
-                el.child(
+                )
+                .child(
                     div().absolute().right(px(ROW_RIGHT)).top_0().bottom_0().flex().items_center().child(
                         Button::new("close-comments")
                             .icon("icons/x.svg")
@@ -415,10 +451,16 @@ impl CommentsView {
             .into_any_element()
     }
 
-    /// The order menu, hung under the sort button.
+    /// The order menu, hung under what opened it: centred under the sheet's centred title,
+    /// from the left edge of anything on the left.
     fn sort_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
-        let at = self.sort_anchor.get();
+        let at = match self.sort_from {
+            SortFrom::Title => self.title_at.get(),
+            SortFrom::Button => self.button_at.get(),
+        };
+        let centred = self.sort_from == SortFrom::Title && self.variant == Variant::Sheet;
+        let x = if centred { at.origin.x + at.size.width / 2. - px(100.) } else { at.origin.x };
         let current = self.order;
         let menu = div()
             .id("sort-menu")
@@ -435,7 +477,7 @@ impl CommentsView {
             .text_size(theme.text(Text::Label))
             .on_mouse_down_out(cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
                 // the sort button toggles the menu itself
-                if !this.sort_anchor.get().contains(&e.position) {
+                if !this.title_at.get().contains(&e.position) && !this.button_at.get().contains(&e.position) {
                     this.sort_open = false;
                     cx.notify();
                 }
@@ -461,10 +503,7 @@ impl CommentsView {
             .rising("sort-menu-in");
         deferred(
             anchored()
-                .position(point(
-                    at.origin.x + at.size.width / 2. - px(100.),
-                    at.origin.y + at.size.height + px(6.),
-                ))
+                .position(point(x, at.origin.y + at.size.height + px(6.)))
                 .snap_to_window_with_margin(px(8.))
                 .child(menu),
         )
