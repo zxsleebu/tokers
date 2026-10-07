@@ -25,7 +25,9 @@ use gstreamer_video as gst_video;
 use gstreamer_video::prelude::*;
 use smallvec::smallvec;
 
-use crate::motion::{Motion, Motioned as _, Rising as _};
+use crate::feed::{FACE_BLUR, FROST_BLUR, SHADE_FROM, SHADE_FULL};
+use crate::motion::{Motion, Motioned as _};
+use crate::state::Store;
 use crate::theme::ActiveTheme as _;
 use crate::ui::icon;
 
@@ -48,6 +50,12 @@ pub enum Status {
     Paused,
     Failed,
 }
+
+/// The pause sign's face.
+const PLAY: f32 = 72.;
+/// Its lens: a little stronger than the action buttons', as it is larger.
+const PLAY_GLASS: gpui::Glass =
+    gpui::Glass { refraction: px(22.), bevel: px(14.), dispersion: 0.2, highlight: 2.5 };
 
 pub struct VideoPlayer {
     pipeline: Option<gst::Element>,
@@ -272,6 +280,54 @@ impl VideoPlayer {
         self.want_play
     }
 
+    /// The pause sign: a glass face like the action buttons', the same liquid or frosted
+    /// glass and transparency, its glyph shadowed when the picture under it is light. It
+    /// comes in by fading and growing, not through a filter layer, under which a backdrop
+    /// would not draw.
+    fn play_glyph(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let prefs = Store::prefs(cx).clone();
+        let clarity = prefs.button_clarity.clamp(0., 1.);
+        let light = self.glimpse().map_or(0., |g| g.light_in(0.4, 0.44, 0.6, 0.56));
+        let shade = ((light - SHADE_FROM) / (SHADE_FULL - SHADE_FROM)).clamp(0., 1.);
+        let copy = |blur: f32, down: f32, alpha: f32| {
+            div()
+                .absolute()
+                .inset_0()
+                .mt(px(down))
+                .flex()
+                .items_center()
+                .justify_center()
+                .blur(px(blur))
+                .child(
+                    icon("icons/play-filled.svg")
+                        .size(px(30.))
+                        .text_color(gpui::black().opacity(alpha * shade)),
+                )
+        };
+        div().absolute().inset_0().flex().items_center().justify_center().child(
+            div().relative().size(px(PLAY)).flex().items_center().justify_center().child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .overflow_hidden()
+                    .bg(gpui::black().opacity(0.32 * (1. - clarity) + 0.22 * shade))
+                    .backdrop_blur(if prefs.liquid_glass { FACE_BLUR } else { FROST_BLUR })
+                    .when(prefs.liquid_glass, |el| el.backdrop_glass(PLAY_GLASS))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(shade > 0.01, |el| el.child(copy(3.5, 1., 0.6)).child(copy(1.5, 1., 0.5)))
+                    .child(icon("icons/play-filled.svg").size(px(30.)).text_color(gpui::white()))
+                    // grows in from a little smaller as it fades in
+                    .motion(("paused", self.toggles), Motion::Base, |el, t| {
+                        let inset = px((1. - t) * PLAY * 0.12);
+                        el.opacity(t).top(inset).left(inset).right(inset).bottom(inset)
+                    }),
+            ),
+        )
+    }
+
     /// The latest frame as a small grid of colours (see [`Glimpse`]).
     pub fn glimpse(&self) -> Option<Arc<Glimpse>> {
         self.glimpse.lock().unwrap().clone()
@@ -369,21 +425,7 @@ impl Render for VideoPlayer {
                     |el, t| el.opacity(t),
                 ))
             })
-            .when(self.chrome && !playing && toggles > 0, |el| {
-                el.child(
-                    div().absolute().inset_0().flex().items_center().justify_center().child(
-                        div()
-                            .size(px(72.))
-                            .rounded_full()
-                            .bg(theme.overlay)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon("icons/play-filled.svg").size(px(30.)).text_color(gpui::white()))
-                            .rising(("paused", toggles)),
-                    ),
-                )
-            })
+            .when(self.chrome && !playing && toggles > 0, |el| el.child(self.play_glyph(cx)))
             .when(self.chrome && self.status != Status::Failed, |el| {
                 el.child(
                     // seek bar: a hairline that thickens under the pointer

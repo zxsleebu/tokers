@@ -36,13 +36,13 @@ const GESTURE_GAP: Duration = Duration::from_millis(160);
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
 /// Light under a glyph or count (see `Glimpse::light_in`) where its shadow starts...
-const SHADE_FROM: f32 = 0.32;
+pub const SHADE_FROM: f32 = 0.32;
 /// ...and where it is at full strength.
-const SHADE_FULL: f32 = 0.6;
+pub const SHADE_FULL: f32 = 0.6;
 /// How hard the button faces blur what is behind them: little, liquid glass is mostly clear.
-const FACE_BLUR: gpui::Pixels = px(5.);
+pub const FACE_BLUR: gpui::Pixels = px(5.);
 /// Frosted faces (liquid glass turned off) blur harder instead.
-const FROST_BLUR: gpui::Pixels = px(10.);
+pub const FROST_BLUR: gpui::Pixels = px(10.);
 /// The button faces' lens: the rim pulls the picture in from behind, with a glint on top.
 const FACE_GLASS: gpui::Glass =
     gpui::Glass { refraction: px(16.), bevel: px(10.), dispersion: 0.2, highlight: 2.5 };
@@ -396,9 +396,17 @@ impl FeedView {
         let Some(aweme) = self.current().cloned() else { return };
         let wait = COMMENTS_DELAY.saturating_sub(self.current_since.elapsed());
         if !wait.is_zero() {
+            // create them when the wait is over, not on whatever render comes next: a paused
+            // or still loading video may not render again
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(wait).await;
-                this.update(cx, |_, cx| cx.notify()).ok();
+                this.update_in(cx, |this, window, cx| {
+                    if this.mode == Some(Mode::Wide) || this.sheet_open {
+                        this.ensure_comments(window, cx);
+                    }
+                    cx.notify();
+                })
+                .ok();
             })
             .detach();
             return;
@@ -1329,8 +1337,25 @@ impl Render for FeedView {
             );
         }
 
-        if let (Some(panel), Some(comments)) = (closed.comments_panel, &self.comments) {
-            comments.update(cx, |c, cx| c.set_variant(Variant::Panel, cx));
+        if let Some(panel) = closed.comments_panel {
+            // the panel stays while the next video's comments are on their way
+            let body = match &self.comments {
+                Some(comments) => {
+                    comments.update(cx, |c, cx| c.set_variant(Variant::Panel, cx));
+                    div()
+                        .size_full()
+                        .child(AnyView::from(comments.clone()).cached(StyleRefinement::default().size_full()))
+                        .veiling(SharedString::from(format!("panel-{}", comments.read(cx).aweme_id())))
+                        .into_any_element()
+                }
+                None => div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(spinner("panel-wait", px(18.), theme.muted_foreground))
+                    .into_any_element(),
+            };
             root = root.child(
                 div()
                     .absolute()
@@ -1341,15 +1366,7 @@ impl Render for FeedView {
                     .bg(theme.background.opacity(0.35))
                     .border_l_1()
                     .border_color(theme.border)
-                    .child(
-                        div()
-                            .size_full()
-                            .child(
-                                AnyView::from(comments.clone())
-                                    .cached(StyleRefinement::default().size_full()),
-                            )
-                            .veiling(SharedString::from(format!("panel-{}", comments.read(cx).aweme_id()))),
-                    ),
+                    .child(body),
             );
         }
 
