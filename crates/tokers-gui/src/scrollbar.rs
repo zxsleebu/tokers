@@ -1,15 +1,17 @@
 //! Overlay scrollbar, after Sonora (`crates/ui/src/scrollbar.rs`): a thin thumb at
 //! the right edge that shows while scrolling or hovered and can be dragged.
-//! Works over a scrolling div ([`ScrollHandle`]) or a virtual [`ListState`].
+//! Works over a scrolling div ([`ScrollHandle`]) or a virtual [`ListState`], and
+//! smooths wheel scrolling over it ([`Glide`]).
 
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
     Context, DispatchPhase, Entity, EntityId, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, ScrollHandle, Window, canvas, div, point, px,
+    MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, Window, canvas, div, point, px,
 };
 
+use crate::glide::Glide;
 use crate::motion::{Spring, Springs};
 use crate::theme::ActiveTheme as _;
 
@@ -49,11 +51,11 @@ impl Target {
         raw.clamp(Pixels::ZERO, self.hidden())
     }
 
-    fn set_offset(&self, offset: Pixels) {
+    fn jump(&self, glide: &Glide, offset: Pixels) {
         let p = point(Pixels::ZERO, -offset);
         match self {
-            Target::Area(s) => s.set_offset(p),
-            Target::List(s) => s.set_offset_from_scrollbar(p),
+            Target::Area(s) => glide.jump(s, p),
+            Target::List(s) => glide.jump(s, p),
         }
     }
 }
@@ -65,8 +67,9 @@ pub struct Scrollbar {
     /// Pointer y and scroll offset when the drag began.
     drag: Option<(Pixels, Pixels)>,
     opacity: Spring,
-    /// The view that draws the scrolled content (repainted while dragging).
+    /// The view that draws the scrolled content (repainted while dragging and gliding).
     owner: Option<EntityId>,
+    glide: Glide,
 }
 
 impl Scrollbar {
@@ -78,15 +81,41 @@ impl Scrollbar {
             drag: None,
             opacity: Spring::new(Springs::RESPONSIVE, 0.),
             owner: None,
+            glide: Glide::default(),
         }
     }
 
     pub fn area(handle: &ScrollHandle, owner: EntityId, cx: &mut gpui::App) -> Entity<Self> {
-        cx.new(|_| Scrollbar { owner: Some(owner), ..Scrollbar::new(Target::Area(handle.clone())) })
+        cx.new(|_| Scrollbar::owned(Target::Area(handle.clone()), owner))
     }
 
     pub fn list(state: &ListState, owner: EntityId, cx: &mut gpui::App) -> Entity<Self> {
-        cx.new(|_| Scrollbar { owner: Some(owner), ..Scrollbar::new(Target::List(state.clone())) })
+        cx.new(|_| Scrollbar::owned(Target::List(state.clone()), owner))
+    }
+
+    fn owned(target: Target, owner: EntityId) -> Self {
+        let mut bar = Scrollbar { owner: Some(owner), ..Scrollbar::new(target) };
+        bar.glide.watch(owner);
+        bar
+    }
+
+    /// The scrolled surface's wheel handler, after the surface has applied the event:
+    /// a mouse wheel notch glides, a touchpad (already fine-grained) stays as it is.
+    pub fn wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match (event.delta.precise(), &self.target) {
+            (false, Target::Area(s)) => self.glide.nudge(s, window),
+            (false, Target::List(s)) => self.glide.nudge(s, window),
+            (true, target) => target.jump(&self.glide, target.offset()),
+        }
+        self.wake(cx);
+    }
+
+    /// Call from the owner's render: picks up offsets set by anything but the glide.
+    pub fn sync(&self) {
+        match &self.target {
+            Target::Area(s) => self.glide.sync(s),
+            Target::List(s) => self.glide.sync(s),
+        }
     }
 
     /// Something scrolled: show the bar for a moment.
@@ -184,7 +213,7 @@ impl Render for Scrollbar {
                                             .min(track);
                                         let room = (track - thumb).max(px(1.));
                                         let offset = offset0 + (e.position.y - y0) * (hidden / room);
-                                        bar.target.set_offset(offset.clamp(Pixels::ZERO, hidden));
+                                        bar.target.jump(&bar.glide, offset.clamp(Pixels::ZERO, hidden));
                                         if let Some(owner) = bar.owner {
                                             gpui::App::notify(cx, owner);
                                         }

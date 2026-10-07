@@ -84,8 +84,9 @@ pub struct FeedView {
     wide_anim: Spring,
     /// 0 = buttons on the video, 1 = beside it; springs on a switch.
     beside_anim: Spring,
-    /// Buttons beside (1) or on (0) the video, from the last layout.
-    beside: f32,
+    /// The buttons are on the video, or on their way to or from it: the caption keeps
+    /// clear of them (it rewraps once, not on every frame of the move).
+    clear_buttons: bool,
 }
 
 impl EventEmitter<FeedEvent> for FeedView {}
@@ -150,7 +151,7 @@ impl FeedView {
             mode: None,
             wide_anim: Spring::new(Springs::PANEL, 0.),
             beside_anim: Spring::new(Springs::PANEL, 1.),
-            beside: 1.,
+            clear_buttons: false,
         }
     }
 
@@ -558,7 +559,7 @@ impl FeedView {
         &self,
         i: usize,
         column: Rect,
-        chrome: bool,
+        chrome: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -596,8 +597,10 @@ impl FeedView {
                 .when_some(player, |el, p| el.child(div().absolute().inset_0().child(p)));
         }
         let _ = window;
-        if chrome && current {
-            slide = slide.child(self.caption(aweme, column.h, cx));
+        if chrome > 0.001 {
+            slide = slide.child(
+                div().absolute().inset_0().opacity(chrome).child(self.caption(aweme, current, column.h, cx)),
+            );
         }
         let id = aweme.aweme_id.clone();
         slide
@@ -611,7 +614,7 @@ impl FeedView {
     }
 
     /// The button stack; `beside` 1 = beside the video (themed faces), 0 = on it (white on dark glass).
-    fn actions(&self, aweme: &Aweme, beside: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn actions(&self, aweme: &Aweme, beside: f32, current: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
         let id = aweme.aweme_id.clone();
         let liked = Store::is_liked(&id, cx);
@@ -733,7 +736,7 @@ impl FeedView {
             .child(sound_disc(
                 music_cover,
                 music,
-                self.current_player().is_some_and(|p| p.read(cx).is_playing()),
+                current && self.current_player().is_some_and(|p| p.read(cx).is_playing()),
                 theme.secondary,
             ))
             .into_any_element()
@@ -763,19 +766,19 @@ impl Render for FeedView {
         let sidebar = self.sidebar;
         let arrange = |sheet, mode| Layout::arrange(w, h, sidebar, sheet, mode);
         let roomy = arrange(false, Mode::Wide);
+        // Always blended: on a switch's first frame the springs have barely moved
+        // (0.9999), and cutting to the target layout there flashes it for a frame.
         let mut closed = arrange(false, mode);
-        if (wt > 0.001 && wt < 0.999) || (bt > 0.001 && bt < 0.999) {
-            let narrow = blend(arrange(false, Mode::Overlay), arrange(false, Mode::Medium), bt);
-            let blended = blend(narrow, roomy, wt);
-            (closed.video, closed.actions, closed.beside) = (blended.video, blended.actions, blended.beside);
-        }
+        let narrow = blend(arrange(false, Mode::Overlay), arrange(false, Mode::Medium), bt);
+        let blended = blend(narrow, roomy, wt);
+        (closed.video, closed.actions, closed.beside) = (blended.video, blended.actions, blended.beside);
         // the panel slides in from (and out to) the right edge
         closed.comments_panel = roomy.comments_panel.filter(|_| wt > 0.001).map(|mut p| {
             p.x += (1. - wt) * p.w;
             p
         });
         let open = arrange(true, if mode == Mode::Wide { Mode::Medium } else { mode });
-        self.beside = closed.beside;
+        self.clear_buttons = closed.beside < 0.999;
         if closed.mode == Mode::Wide && self.sheet_open {
             self.sheet_open = false;
             self.sheet.snap(0.);
@@ -808,10 +811,14 @@ impl Render for FeedView {
         // slides around the position: the current one, its neighbours, whatever the pager crosses
         let lo = (pos.floor() as isize - 1).max(0) as usize;
         let hi = ((pos.ceil() as usize) + 1).min(self.items.len() - 1);
-        let chrome = closed.mode != Mode::Wide && sheet_t < 0.5;
+        // a slide's caption and buttons ride with it; only the ones in view are drawn
+        let in_view = |i: usize| (i as f32 - pos).abs() < 1.;
+        // the caption fades out under the panel and the sheet rather than vanishing
+        let chrome = (1. - wt) * (1. - sheet_t * 2.).clamp(0., 1.);
         let slides: Vec<AnyElement> = (lo..=hi)
             .map(|i| {
                 let top = (i as f32 - pos) * column.h;
+                let chrome = if in_view(i) { chrome } else { 0. };
                 div()
                     .absolute()
                     .left_0()
@@ -823,7 +830,6 @@ impl Render for FeedView {
             })
             .collect();
 
-        let current = self.current().cloned();
         let mut stage = div()
             .id("stage")
             .absolute()
@@ -849,7 +855,26 @@ impl Render for FeedView {
 
         let mut root = div().size_full().relative().child(stage);
 
-        if let (Some(actions), Some(aweme)) = (closed.actions.filter(|_| sheet_t < 0.99), &current) {
+        if let Some(actions) = closed.actions.filter(|_| sheet_t < 0.99) {
+            let stacks: Vec<AnyElement> = (lo..=hi)
+                .filter(|&i| in_view(i))
+                .map(|i| {
+                    let aweme = &self.items[i];
+                    div()
+                        .id(SharedString::from(format!("acts-{}", aweme.aweme_id)))
+                        .absolute()
+                        .left_0()
+                        .top(px((i as f32 - pos) * column.h))
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .justify_end()
+                        .items_center()
+                        .pb(px(closed.actions_lift))
+                        .child(self.actions(aweme, closed.beside, i == self.index, cx))
+                        .into_any_element()
+                })
+                .collect();
             root = root.child(
                 div()
                     .absolute()
@@ -857,17 +882,9 @@ impl Render for FeedView {
                     .top(px(actions.y - origin.1))
                     .w(px(actions.w))
                     .h(px(actions.h))
-                    .flex()
-                    .flex_col()
-                    .justify_end()
-                    .items_center()
-                    .pb(px(closed.actions_lift))
+                    .overflow_hidden()
                     .opacity(1. - sheet_t)
-                    .child(
-                        div()
-                            .child(self.actions(aweme, closed.beside, cx))
-                            .rising(SharedString::from(format!("acts-{}", aweme.aweme_id))),
-                    ),
+                    .children(stacks),
             );
         }
 
@@ -922,11 +939,11 @@ impl Render for FeedView {
 
 impl FeedView {
     /// Author, description and sound over the bottom of the video.
-    fn caption(&self, aweme: &Aweme, height: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn caption(&self, aweme: &Aweme, current: bool, height: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
         let white = gpui::white();
         let long = is_long(&aweme.desc);
-        let open = self.desc_open && long;
+        let open = self.desc_open && long && current;
         div()
             .absolute()
             .left_0()
@@ -936,7 +953,7 @@ impl FeedView {
             .pb_5()
             .pl_4()
             // room for the buttons while they sit on the video
-            .pr(px(16. + 64. * (1. - self.beside)))
+            .pr(px(if self.clear_buttons { 80. } else { 16. }))
             .flex()
             .flex_col()
             .gap_1p5()

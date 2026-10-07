@@ -712,7 +712,7 @@ fn scroll_area(
     bar: &Entity<Scrollbar>,
     content: impl IntoElement,
 ) -> AnyElement {
-    let (wake, hover) = (bar.clone(), bar.clone());
+    let (wheel, hover) = (bar.clone(), bar.clone());
     div()
         .id(id)
         .relative()
@@ -724,7 +724,7 @@ fn scroll_area(
                 .size_full()
                 .overflow_y_scroll()
                 .track_scroll(handle)
-                .on_scroll_wheel(move |_, _, cx| wake.update(cx, |b, cx| b.wake(cx)))
+                .on_scroll_wheel(move |e, window, cx| wheel.update(cx, |b, cx| b.wheel(e, window, cx)))
                 .child(content),
         )
         .child(bar.clone())
@@ -807,6 +807,9 @@ fn vacancy(
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        for bar in [&self.favourites_bar, &self.settings_bar] {
+            bar.read(cx).sync();
+        }
         let theme = *cx.theme();
         let viewport = window.viewport_size();
         let prefs = Store::prefs(cx).clone();

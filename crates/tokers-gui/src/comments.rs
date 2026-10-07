@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, Hsla, ListAlignment, ListScrollEvent, ListState,
-    MouseButton, ObjectFit, Pixels, Render, SharedString, Window, div, img, list, px,
+    MouseButton, ObjectFit, Pixels, Render, ScrollWheelEvent, SharedString, Window, div, img, list, px,
 };
 use tokers::TikTok;
 use tokers::models::{Aweme, Comment, UrlList};
@@ -261,14 +261,17 @@ impl CommentsView {
     }
 
     fn render_row(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // padding, not margins: the list measures a row by its box
         if self.variant == Variant::Panel && ix == 0 {
-            return div().child(self.header(cx)).child(self.title(cx)).mb_4().into_any_element();
+            return div().child(self.header(cx)).child(self.title(cx)).into_any_element();
         }
+        // room under the title for the first row
+        let first = ix == self.lead();
         if ix >= self.footer_ix() {
-            return div().px_5().pb_4().child(self.footer(cx)).into_any_element();
+            return div().px_5().pb_4().when(first, |el| el.pt_4()).child(self.footer(cx)).into_any_element();
         }
         let comment = self.items[ix - self.lead()].clone();
-        div().px_5().pb_5().child(self.row(&comment, 0, cx)).into_any_element()
+        div().px_5().pb_5().when(first, |el| el.pt_4()).child(self.row(&comment, 0, cx)).into_any_element()
     }
 
     fn header(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -446,8 +449,8 @@ impl CommentsView {
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_thread(&toggle_id, cx))),
             );
             if let Some(thread) = thread.filter(|t| t.open) {
-                let replies: Vec<AnyElement> = thread.items.iter().map(|r| self.row(r, 1, cx)).collect();
-                body = body.child(div().flex().flex_col().gap_3().mt_2().children(replies));
+                let rows: Vec<AnyElement> = thread.items.iter().map(|r| self.row(r, 1, cx)).collect();
+                body = body.child(div().flex().flex_col().gap_3().mt_2().children(rows));
                 if thread.loading {
                     body = body.child(div().py_1().child(spinner(
                         SharedString::from(format!("spin-{cid}")),
@@ -456,6 +459,7 @@ impl CommentsView {
                     )));
                 } else if thread.has_more && !thread.items.is_empty() {
                     let more_id = cid.clone();
+                    let left = replies.saturating_sub(thread.items.len() as u64);
                     body = body.child(
                         div()
                             .id(SharedString::from(format!("more-{cid}")))
@@ -464,7 +468,10 @@ impl CommentsView {
                             .text_color(theme.muted_foreground)
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme.foreground))
-                            .child("Ещё ответы")
+                            .child(match left {
+                                0 => "Ещё ответы".to_string(),
+                                n => format!("Ещё ответы: {}", compact(n)),
+                            })
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.load_replies(more_id.clone(), cx)),
                             ),
@@ -580,6 +587,8 @@ impl Render for CommentsView {
         if self.list.item_count() != self.row_count() {
             self.list.reset(self.row_count());
         }
+        self.scrollbar.read(cx).sync();
+        let bar = self.scrollbar.clone();
         div()
             .id("comments")
             .size_full()
@@ -599,6 +608,9 @@ impl Render for CommentsView {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .on_scroll_wheel(move |e: &ScrollWheelEvent, window, cx| {
+                        bar.update(cx, |bar, cx| bar.wheel(e, window, cx))
+                    })
                     .child(
                         list(
                             self.list.clone(),

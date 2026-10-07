@@ -15,8 +15,8 @@ pub enum Springs {}
 impl Springs {
     /// Fast, nearly critically damped feedback for direct UI transitions.
     pub const RESPONSIVE: SpringConfig = SpringConfig::new(360., 38., 1.);
-    /// Feed paging: a touch of overshoot, settles in ~0.4 s.
-    pub const PAGE: SpringConfig = SpringConfig::new(260., 30., 1.);
+    /// Feed paging: a touch of overshoot, settles in ~0.25 s.
+    pub const PAGE: SpringConfig = SpringConfig::new(560., 44., 1.);
     /// Panels and sheets sliding in.
     pub const PANEL: SpringConfig = SpringConfig::new(300., 34., 1.);
 }

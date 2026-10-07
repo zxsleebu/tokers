@@ -5,6 +5,7 @@ mod ambient;
 mod assets;
 mod comments;
 mod feed;
+mod glide;
 mod layout;
 mod media;
 mod motion;
