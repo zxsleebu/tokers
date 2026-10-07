@@ -23,7 +23,7 @@ use crate::scrollbar::Scrollbar;
 use crate::state::{CommentsMode, Store, downloads_dir};
 use crate::theme::{ActiveTheme as _, Palette, Text, Theme};
 use crate::ui::{
-    Button, Switch, eyebrow, icon, menu_item, menu_panel, separator, slider, tab_bar, window_controls,
+    Button, Switch, eyebrow, icon, menu_item, menu_panel, separator, slider, tab_bar, veil, window_controls,
     window_frame, window_radius,
 };
 use crate::*;
@@ -119,6 +119,8 @@ impl SettingsTab {
 const SETTINGS_WIDTH: f32 = 640.;
 /// The header over it: the category bar (36 px) with 24 px above and below.
 const SETTINGS_HEADER: f32 = 84.;
+/// How far the rows are blurred where they pass under the header (Sonora's `HEADER_BLUR`).
+const SETTINGS_HEADER_BLUR: Pixels = px(1.);
 /// How far past the header the rows keep dissolving, so they leave no hard edge under it.
 const SETTINGS_FADE_TAIL: f32 = 48.;
 /// A dropdown's width (Sonora's `Picker::NARROW` and `REGULAR`).
@@ -482,7 +484,7 @@ impl Root {
             )
     }
 
-    fn page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn page(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
         match self.page {
             // cached: the ambient field repaints every frame, the feed only when it changes
@@ -495,7 +497,7 @@ impl Root {
                 }
                 None => div().into_any_element(),
             },
-            Page::Settings => self.settings(cx),
+            Page::Settings => self.settings(window, cx),
             Page::Favourites => self.favourites(cx),
             Page::Downloads => vacancy(
                 "icons/download.svg",
@@ -632,7 +634,7 @@ impl Root {
 
     /// Sonora's settings page: a category bar floating at the top, the rows of the chosen
     /// category under it in one column, dissolving as they scroll up beneath the bar.
-    fn settings(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn settings(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
         let rows: Vec<AnyElement> = match self.settings_tab {
             SettingsTab::General => self.general_rows(cx),
@@ -698,6 +700,8 @@ impl Root {
                     .justify_center()
                     .items_center()
                     .px_6()
+                    // what scrolls under the header is hazed, the rows dissolving into it
+                    .child(veil(px(SETTINGS_HEADER), SETTINGS_HEADER_BLUR, window))
                     .child(categories),
             )
             .child(self.settings_bar.clone())
@@ -1113,7 +1117,7 @@ impl Render for Root {
         let feed_page = matches!(self.page, Page::ForYou | Page::Watching);
         let drawer_t = self.drawer.tick(window, cx).clamp(0., 1.);
         let radius = window_radius(window);
-        let page = self.page(cx);
+        let page = self.page(window, cx);
         let sidebar = sidebar_shown.then(|| self.sidebar(window, cx).into_any_element());
         let drawer =
             (!sidebar_shown && drawer_t > 0.001).then(|| self.sidebar(window, cx).into_any_element());

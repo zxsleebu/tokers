@@ -552,18 +552,51 @@ pub fn eyebrow(label: &str, theme: &crate::theme::Theme) -> Div {
         .child(label.to_uppercase())
 }
 
-/// Segment buttons in one pill (Sonora's `TabBar`), floating over the page under it.
+/// How much of the popover colour a glass control keeps over what it blurs (Sonora's
+/// `GLASS_FILL`)...
+const GLASS_FILL: f32 = 0.2;
+/// ...and how hard it blurs it (`GLASS_BLUR`).
+const GLASS_BLUR: Pixels = px(8.);
+
+/// Segment buttons in one pill (Sonora's `TabBar`, `.blurred()`), floating over the page under
+/// it: frosted glass, a faint popover fill over a hard blur of what passes beneath.
 pub fn tab_bar(items: impl IntoIterator<Item = Button>, theme: &crate::theme::Theme) -> Div {
     div()
         .flex()
         .gap_1()
         .p_1()
         .rounded(theme.radius)
-        .bg(theme.secondary)
+        .bg(theme.popover.opacity(GLASS_FILL))
+        .backdrop_blur(GLASS_BLUR)
         .border_1()
         .border_color(theme.border)
         .shadow_sm()
         .children(items.into_iter().map(|item| item.flex_shrink_0().rounded(theme.radius - px(2.))))
+}
+
+/// How many strips a veil's blur fades in through: a quad each, so more only smooth it.
+const VEIL_STRIPS: usize = 64;
+/// The curve of that fade: well under one, so the haze reaches working strength quickly and
+/// only the far edge reads as clear.
+const VEIL_HAZE: f32 = 0.4;
+
+/// A band that blurs what passes under it (Sonora's `veil`, top edge): full strength along its
+/// top, fading to nothing across `height`, so chrome floating over content stays readable with
+/// no line where the treatment stops. It fills its parent, which has to be `height` tall and
+/// `relative`. The renderer blurs a run of consecutive backdrops in one pass.
+pub fn veil(height: Pixels, blur: Pixels, window: &Window) -> Div {
+    let scale = window.scale_factor();
+    let snapped = |at: Pixels| px((f32::from(at) * scale).round() / scale);
+    let edges: Vec<Pixels> =
+        (0..=VEIL_STRIPS).map(|slice| snapped(height * (slice as f32 / VEIL_STRIPS as f32))).collect();
+    let strips = edges.windows(2).filter_map(|span| {
+        let cut = span[1] - span[0];
+        let across = (span[0] + cut / 2.) / height;
+        (cut > Pixels::ZERO).then(|| {
+            div().flex_none().w_full().h(cut).opacity((1. - across).powf(VEIL_HAZE)).backdrop_blur(blur)
+        })
+    });
+    div().absolute().inset_0().flex().flex_col().children(strips.collect::<Vec<_>>())
 }
 
 /// A dropdown's panel (Sonora's `Menu`).
