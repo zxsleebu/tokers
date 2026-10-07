@@ -1169,12 +1169,56 @@ impl FeedView {
                 button("share", "icons/forward.svg", compact(s.share_count), fg, None, cx)
                     .on_click(cx.listener(|this, _, _, cx| this.copy_link(cx))),
             )
-            .child(div().mt_2().child(sound_disc(
-                music_cover,
-                music,
-                current && self.current_player().is_some_and(|p| p.read(cx).is_playing()),
-                theme.secondary,
-            )))
+            .child({
+                // the sound takes the drop like the buttons; its padding meets theirs
+                let faces = self.lens.faces.clone();
+                div()
+                    .id("sound-row")
+                    .pt_2()
+                    .w(px(FACE + 16.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .relative()
+                            .child(sound_disc(
+                                music_cover,
+                                music,
+                                current && self.current_player().is_some_and(|p| p.read(cx).is_playing()),
+                                theme.secondary,
+                            ))
+                            .when(current, |el| {
+                                el.child(
+                                    canvas(
+                                        move |bounds, _, _| {
+                                            faces.borrow_mut().insert("sound", bounds);
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .inset_0(),
+                                )
+                            }),
+                    )
+                    .when(current, |el| {
+                        el.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            if *hovered {
+                                this.lens.hovered = Some("sound");
+                            } else if this.lens.hovered == Some("sound") {
+                                this.lens.hovered = None;
+                            }
+                            cx.notify();
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.lens.press();
+                                cx.notify();
+                            }),
+                        )
+                    })
+            })
             .into_any_element()
     }
 }
@@ -1586,7 +1630,6 @@ fn sound_disc(
         .cursor_pointer()
         .child(div().absolute().inset_0().flex().items_center().justify_center().child(groove))
         .child(face)
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, _, cx| {
             if let Some(link) = &link {
                 cx.open_url(link);
