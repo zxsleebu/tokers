@@ -25,3 +25,5 @@ serde_json.workspace = true
 smallvec = "1.16.2"
 anyhow = "1.0.104"
 libheif-rs = "3.0.0"
+log.workspace = true
+env_logger = "0.11"

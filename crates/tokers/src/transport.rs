@@ -35,12 +35,38 @@ impl Default for TransportConfig {
     }
 }
 
+/// How a request waits for its turn on its egress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pace {
+    /// Goes at once (CDN media, pages that are not the API).
+    Free,
+    /// Starts at least `min_interval` after the egress's last start.
+    Queued,
+    /// Paced the same, but ahead of every queued request: something the user is
+    /// waiting on right now (the comments they opened), not a prefetch.
+    Urgent,
+}
+
+impl From<bool> for Pace {
+    fn from(throttle: bool) -> Self {
+        if throttle { Pace::Queued } else { Pace::Free }
+    }
+}
+
+/// Pacing of one egress.
+#[derive(Default)]
+struct Lane {
+    last: Option<Instant>,
+    /// Urgent requests waiting: queued ones hold back while there are any.
+    urgent: usize,
+}
+
 /// One keep-alive client per egress, shared by every caller.
 pub struct Transport {
     config: TransportConfig,
     min_interval: Mutex<Duration>,
     clients: Mutex<HashMap<Option<ProxyUrl>, wreq::Client>>,
-    next_slot: Mutex<HashMap<Option<ProxyUrl>, Instant>>,
+    lanes: Mutex<HashMap<Option<ProxyUrl>, Lane>>,
 }
 
 #[derive(Debug)]
@@ -55,7 +81,7 @@ impl Transport {
             min_interval: Mutex::new(config.min_interval),
             config,
             clients: Mutex::default(),
-            next_slot: Mutex::default(),
+            lanes: Mutex::default(),
         }
     }
 
@@ -63,19 +89,44 @@ impl Transport {
         *self.min_interval.lock().unwrap() = interval;
     }
 
-    /// Wait for this request's start slot: starts on one egress are
-    /// `min_interval` apart, across all tasks.
-    pub async fn wait_slot(&self, proxy: Option<&ProxyUrl>) {
-        let slot = {
-            let gap = *self.min_interval.lock().unwrap();
-            let mut slots = self.next_slot.lock().unwrap();
-            let now = Instant::now();
-            let entry = slots.entry(proxy.cloned()).or_insert(now);
-            let slot = (*entry).max(now);
-            *entry = slot + gap;
-            slot
-        };
-        tokio::time::sleep_until(slot).await;
+    /// Wait for this request's start slot: starts on one egress are `min_interval`
+    /// apart, across all tasks; an [`Pace::Urgent`] request takes the next slot ahead of
+    /// queued ones. Returns how long it waited.
+    pub async fn wait_slot(&self, proxy: Option<&ProxyUrl>, pace: Pace) -> Duration {
+        let began = Instant::now();
+        if pace == Pace::Free {
+            return Duration::ZERO;
+        }
+        let key = proxy.cloned();
+        // counted while waiting, uncounted however the wait ends (a dropped future too)
+        struct Waiting<'a>(&'a Mutex<HashMap<Option<ProxyUrl>, Lane>>, Option<ProxyUrl>);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                if let Some(lane) = self.0.lock().unwrap().get_mut(&self.1) {
+                    lane.urgent = lane.urgent.saturating_sub(1);
+                }
+            }
+        }
+        let _waiting = (pace == Pace::Urgent).then(|| {
+            self.lanes.lock().unwrap().entry(key.clone()).or_default().urgent += 1;
+            Waiting(&self.lanes, key.clone())
+        });
+        loop {
+            let wake = {
+                let gap = *self.min_interval.lock().unwrap();
+                let mut lanes = self.lanes.lock().unwrap();
+                let lane = lanes.entry(key.clone()).or_default();
+                let now = Instant::now();
+                let ready = lane.last.map_or(now, |last| last + gap);
+                if now >= ready && (pace == Pace::Urgent || lane.urgent == 0) {
+                    lane.last = Some(now);
+                    return now - began;
+                }
+                // a queued request behind an urgent one looks again shortly after it went
+                ready.max(now + Duration::from_millis(20))
+            };
+            tokio::time::sleep_until(wake).await;
+        }
     }
 
     fn client(&self, proxy: Option<&ProxyUrl>) -> Result<wreq::Client> {
@@ -106,11 +157,9 @@ impl Transport {
         url: &str,
         headers: &[(String, String)],
         proxy: Option<&ProxyUrl>,
-        throttle: bool,
+        pace: impl Into<Pace>,
     ) -> Result<RawResponse> {
-        if throttle {
-            self.wait_slot(proxy).await;
-        }
+        self.wait_slot(proxy, pace.into()).await;
         let client = self.client(proxy)?;
         let resp = client.get(url).headers(header_map(headers)?).send().await?;
         let status = resp.status().as_u16();
@@ -129,9 +178,9 @@ impl Transport {
         url: &str,
         headers: &[(String, String)],
         proxy: Option<&ProxyUrl>,
-        throttle: bool,
+        pace: impl Into<Pace>,
     ) -> Result<serde_json::Value> {
-        let resp = self.get(url, headers, proxy, throttle).await?;
+        let resp = self.get(url, headers, proxy, pace).await?;
         parse_json(resp)
     }
 }

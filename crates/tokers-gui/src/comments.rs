@@ -186,10 +186,6 @@ impl CommentsView {
         this
     }
 
-    pub fn aweme_id(&self) -> &str {
-        &self.aweme.aweme_id
-    }
-
     pub fn set_variant(&mut self, variant: Variant, cx: &mut Context<Self>) {
         if self.variant != variant {
             self.variant = variant;

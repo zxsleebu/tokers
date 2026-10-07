@@ -12,7 +12,7 @@ use crate::params::Params;
 use crate::proxy::ProxyUrl;
 use crate::signer::Signer;
 use crate::template::{PreparedRequest, RequestTemplate};
-use crate::transport::{Transport, TransportConfig};
+use crate::transport::{Pace, Transport, TransportConfig};
 
 /// Edge cookies the app sends on these hosts.
 pub const TTNET_COOKIES: &str = "store-idc=useast5; tt-target-idc=useast5";
@@ -47,6 +47,8 @@ pub struct TikTok {
     shared: Arc<Shared>,
     identity: Identity,
     proxy: Option<ProxyUrl>,
+    /// How this handle's requests wait for their turn (see [`TikTok::urgent`]).
+    pace: Pace,
 }
 
 pub struct TikTokBuilder {
@@ -112,6 +114,7 @@ impl TikTokBuilder {
             }),
             identity: self.identity,
             proxy: self.proxy,
+            pace: Pace::Queued,
         }
     }
 }
@@ -185,11 +188,37 @@ impl TikTok {
         self.send(|now| self.shared.template.api(path, params, &self.identity, now)).await
     }
 
+    /// A view of this client whose requests go ahead of queued ones on the egress (same
+    /// pacing between starts): for what the user is waiting on now, not prefetching.
+    pub fn urgent(&self) -> TikTok {
+        TikTok { pace: Pace::Urgent, ..self.clone() }
+    }
+
     async fn send(&self, prepare: impl Fn(u64) -> PreparedRequest) -> Result<Value> {
         let mut attempt = 0;
+        let began = std::time::Instant::now();
         loop {
-            let (url, headers) = self.sign_request(&prepare(now_ms()))?;
-            match self.shared.transport.get_json(&url, &headers, self.proxy.as_ref(), true).await {
+            // signed once its turn has come, so the timestamps in it are fresh
+            let waited = self.shared.transport.wait_slot(self.proxy.as_ref(), self.pace).await;
+            let request = prepare(now_ms());
+            let path = request.path.clone();
+            let (url, headers) = self.sign_request(&request)?;
+            let sent = std::time::Instant::now();
+            let result =
+                self.shared.transport.get_json(&url, &headers, self.proxy.as_ref(), Pace::Free).await;
+            let outcome = match &result {
+                Ok(_) => "ok".to_string(),
+                Err(e) => e.to_string(),
+            };
+            log::debug!(
+                "{path} [{:?}] attempt {}: waited {} ms for a slot, {outcome} in {} ms ({} ms since asked)",
+                self.pace,
+                attempt + 1,
+                waited.as_millis(),
+                sent.elapsed().as_millis(),
+                began.elapsed().as_millis(),
+            );
+            match result {
                 Err(e) if e.is_transient() && attempt < self.shared.retries => {
                     attempt += 1;
                     tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;

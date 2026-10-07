@@ -20,7 +20,7 @@
 
 pub const TITLEBAR: f32 = 40.;
 pub const SIDEBAR: f32 = 208.;
-pub const ACTIONS: f32 = 88.;
+pub const ACTIONS: f32 = 80.;
 pub const COMMENTS_MIN: f32 = 360.;
 /// Share of the content height the comment sheet takes when open.
 pub const SHEET: f32 = 0.58;

@@ -21,7 +21,7 @@ use crate::ambilight::Ambilight;
 use crate::comments::{CommentsEvent, CommentsView, Variant, avatar_el, is_long, more_toggle, rich};
 use crate::layout::{Layout, Mode, Rect, TITLEBAR};
 use crate::media::Images;
-use crate::motion::{Motion, Motioned as _, Rising as _, Spring, Springs, Veiling as _, mix};
+use crate::motion::{Motion, Motioned as _, Rising as _, Spring, Springs, mix};
 use crate::player::{Glimpse, VideoPlayer};
 use crate::state::{CommentsMode, Store, downloads_dir};
 use crate::theme::{ActiveTheme as _, Text};
@@ -117,8 +117,10 @@ impl Lens {
         let origin = self.origin.get();
         let face = self.hovered.and_then(|key| self.faces.borrow().get(key).copied());
         if let Some(b) = face {
-            let target = f32::from(b.origin.y - origin.y);
-            self.x = f32::from(b.origin.x - origin.x);
+            // the drop sits on the face's centre (faces differ in size: the avatar is larger)
+            let centre = b.center();
+            let target = f32::from(centre.y - origin.y);
+            self.x = f32::from(centre.x - origin.x);
             if self.pop.value() < 0.05 {
                 // appear where the pointer is rather than slide in from the last spot
                 self.y.snap(target);
@@ -404,7 +406,8 @@ impl FeedView {
         }
         let Some(aweme) = self.current().cloned() else { return };
         let wait = COMMENTS_DELAY.saturating_sub(self.current_since.elapsed());
-        let view = cx.new(|cx| CommentsView::new(self.tiktok.clone(), self.io.clone(), aweme, wait, cx));
+        // the comments being looked at go ahead of feed prefetches
+        let view = cx.new(|cx| CommentsView::new(self.tiktok.urgent(), self.io.clone(), aweme, wait, cx));
         cx.subscribe(&view, |this, _, event, cx| match event {
             CommentsEvent::Close => this.close_comments(cx),
         })
@@ -853,7 +856,7 @@ impl FeedView {
         // the drop is and how full it has grown.
         let glow = |key: &'static str| {
             let Some(face) = self.lens.faces.borrow().get(key).copied() else { return 0. };
-            let at = f32::from(face.origin.y - origin_at.y);
+            let at = f32::from(face.center().y - origin_at.y);
             (1. - (drop.y - at).abs() / (FACE * 0.8)).clamp(0., 1.) * drop.size.clamp(0., 1.)
         };
 
@@ -1010,7 +1013,7 @@ impl FeedView {
                 move |stack, _, window, _| {
                     let base = (FACE + LENS_GROW) * drop.size;
                     let size = gpui::size(px(base * drop.wide), px(base * drop.tall));
-                    let centre = stack.origin + gpui::point(px(drop.x + FACE / 2.), px(drop.y + FACE / 2.));
+                    let centre = stack.origin + gpui::point(px(drop.x), px(drop.y));
                     let bounds = Bounds::new(centre - gpui::point(size.width / 2., size.height / 2.), size);
                     let radius = gpui::Corners::all(size.width.min(size.height) / 2.);
                     window.with_subpixel_paint(|window| {
@@ -1045,34 +1048,76 @@ impl FeedView {
                 )
             })
             .children(lens)
-            .child(
+            .child({
+                let faces = self.lens.faces.clone();
                 div()
                     .id("author")
-                    .relative()
-                    .mb_4()
+                    // like the buttons: its padding meets theirs, so the drop flows on down
+                    .pb_4()
+                    .w(px(FACE + 16.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
                     .cursor_pointer()
-                    .child(div().rounded_full().border_2().border_color(fg).child(avatar_el(
-                        avatar,
-                        px(46.),
-                        &aweme.author.nickname,
-                        theme.secondary,
-                        theme.muted_foreground,
-                    )))
                     .child(
                         div()
-                            .absolute()
-                            .bottom(px(-8.))
-                            .left(px(15.))
-                            .size(px(20.))
-                            .rounded_full()
-                            .bg(accent)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon("icons/plus.svg").size(px(13.)).text_color(theme.primary_foreground)),
+                            .relative()
+                            .child(div().rounded_full().border_2().border_color(fg).child(avatar_el(
+                                avatar,
+                                px(46.),
+                                &aweme.author.nickname,
+                                theme.secondary,
+                                theme.muted_foreground,
+                            )))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .bottom(px(-8.))
+                                    .left(px(15.))
+                                    .size(px(20.))
+                                    .rounded_full()
+                                    .bg(accent)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        icon("icons/plus.svg")
+                                            .size(px(13.))
+                                            .text_color(theme.primary_foreground),
+                                    ),
+                            )
+                            .when(current, |el| {
+                                el.child(
+                                    canvas(
+                                        move |bounds, _, _| {
+                                            faces.borrow_mut().insert("author", bounds);
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .inset_0(),
+                                )
+                            }),
                     )
-                    .on_click(move |_, _, cx| cx.open_url(&profile)),
-            )
+                    .when(current, |el| {
+                        el.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            if *hovered {
+                                this.lens.hovered = Some("author");
+                            } else if this.lens.hovered == Some("author") {
+                                this.lens.hovered = None;
+                            }
+                            cx.notify();
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.lens.press();
+                                cx.notify();
+                            }),
+                        )
+                    })
+                    .on_click(move |_, _, cx| cx.open_url(&profile))
+            })
             .child(
                 button(
                     "like",
@@ -1338,7 +1383,6 @@ impl Render for FeedView {
                     div()
                         .size_full()
                         .child(AnyView::from(comments.clone()).cached(StyleRefinement::default().size_full()))
-                        .veiling(SharedString::from(format!("panel-{}", comments.read(cx).aweme_id())))
                         .into_any_element()
                 }
                 None => div()

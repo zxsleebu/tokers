@@ -50,6 +50,9 @@ actions!(
 
 /// Open the main window and run until it is closed.
 pub fn run(backend: Backend) {
+    // `RUST_LOG=tokers=debug` shows every API request: its wait for a slot, its attempts,
+    // how long it took
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).try_init();
     // The API client is tokio-based; gpui has its own executor. Requests run on
     // this runtime, and their JoinHandles are awaited from gpui tasks.
     let runtime = tokio::runtime::Builder::new_multi_thread()
