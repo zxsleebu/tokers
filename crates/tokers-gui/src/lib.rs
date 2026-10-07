@@ -2,6 +2,7 @@
 //! binary that links it: see [`run`].
 
 mod ambient;
+mod ambilight;
 mod assets;
 mod comments;
 mod feed;

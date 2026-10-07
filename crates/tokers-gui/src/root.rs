@@ -670,6 +670,35 @@ impl Root {
                             ),
                     )
                     .child(
+                        section("Подсветка вокруг видео", &theme)
+                            .child(
+                                choice(
+                                    "ambilight",
+                                    prefs.ambilight,
+                                    "Свечение цветами видео",
+                                    "Края видео подсвечивают фон вокруг него, как Ambilight у телевизоров. Чёрные полосы не светят.",
+                                    &theme,
+                                )
+                                .on_click(|_, _, cx| Store::update_prefs(cx, |p| p.ambilight = !p.ambilight)),
+                            )
+                            .child(labelled_slider(
+                                "ambilight-strength",
+                                "Яркость",
+                                prefs.ambilight_strength,
+                                |p, v| p.ambilight_strength = v,
+                                &theme,
+                                cx,
+                            ))
+                            .child(labelled_slider(
+                                "ambilight-spread",
+                                "Размах",
+                                prefs.ambilight_spread,
+                                |p, v| p.ambilight_spread = v,
+                                &theme,
+                                cx,
+                            )),
+                    )
+                    .child(
                         section("Клавиши", &theme).child(div().grid().grid_cols(2).gap_x_6().gap_y_2().children(keys.iter().map(
                             |(k, what)| {
                                 div()
@@ -741,6 +770,28 @@ fn heading(title: &str, sub: String, theme: &Theme) -> impl IntoElement {
             div().text_size(theme.text(Text::Title)).font_weight(FontWeight::BOLD).child(title.to_string()),
         )
         .child(div().text_color(theme.muted_foreground).child(sub))
+}
+
+/// A setting's name, its value in percent and a slider for it.
+fn labelled_slider(
+    id: &'static str,
+    label: &'static str,
+    value: f32,
+    set: fn(&mut crate::state::Prefs, f32),
+    theme: &Theme,
+    cx: &App,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .pt_1()
+        .child(
+            div().flex().justify_between().child(div().font_weight(FontWeight::MEDIUM).child(label)).child(
+                div().text_color(theme.muted_foreground).child(format!("{}%", (value * 100.).round())),
+            ),
+        )
+        .child(slider(id, value, move |v, cx| Store::tweak_prefs(cx, |p| set(p, v)), Store::save_prefs, cx))
 }
 
 /// A radio row: a dot, a title and a line about it.

@@ -8,7 +8,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
@@ -55,6 +55,8 @@ pub struct VideoPlayer {
     /// How much of the strip under the action buttons is near white in the latest frame
     /// (`f32` bits): white glyphs over it need a shadow.
     edge_light: Arc<AtomicU32>,
+    /// The latest frame shrunk to a small grid of colours, for the ambient light.
+    glimpse: Arc<Mutex<Option<Arc<Glimpse>>>>,
     /// Frame painted last; dropped from the atlas once a newer one replaces it.
     shown: Option<Arc<RenderImage>>,
     status: Status,
@@ -92,6 +94,7 @@ impl VideoPlayer {
             pipeline: None,
             latest: Arc::default(),
             edge_light: Arc::default(),
+            glimpse: Arc::default(),
             shown: None,
             status: Status::Loading,
             want_play: play,
@@ -138,11 +141,13 @@ impl VideoPlayer {
         let pending = Arc::new(AtomicBool::new(false));
         let latest = self.latest.clone();
         let edge_light = self.edge_light.clone();
+        let glimpse = self.glimpse.clone();
         let pending_cb = pending.clone();
         let deliver = Arc::new(move |sample: &gst::Sample| {
-            if let Some((image, light)) = to_render_image(sample) {
+            if let Some((image, light, small)) = to_render_image(sample) {
                 *latest.lock().unwrap() = Some(image);
                 edge_light.store(light.to_bits(), Ordering::Relaxed);
+                *glimpse.lock().unwrap() = Some(Arc::new(small));
                 if !pending_cb.swap(true, Ordering::AcqRel) {
                     let _ = tx.unbounded_send(());
                 }
@@ -271,6 +276,11 @@ impl VideoPlayer {
 
     pub fn is_playing(&self) -> bool {
         self.want_play
+    }
+
+    /// The latest frame as a small grid of colours (see [`Glimpse`]).
+    pub fn glimpse(&self) -> Option<Arc<Glimpse>> {
+        self.glimpse.lock().unwrap().clone()
     }
 
     /// Share (0..1) of the strip under the action buttons that is near white.
@@ -456,8 +466,8 @@ impl VideoPlayer {
     }
 }
 
-/// The frame as gpui wants it, and how light the strip under the buttons is.
-fn to_render_image(sample: &gst::Sample) -> Option<(Arc<RenderImage>, f32)> {
+/// The frame as gpui wants it, how light the strip under the buttons is, and a glimpse of it.
+fn to_render_image(sample: &gst::Sample) -> Option<(Arc<RenderImage>, f32, Glimpse)> {
     let caps = sample.caps()?;
     let info = gst_video::VideoInfo::from_caps(caps).ok()?;
     let buffer = sample.buffer()?;
@@ -470,9 +480,52 @@ fn to_render_image(sample: &gst::Sample) -> Option<(Arc<RenderImage>, f32)> {
         bgra.extend_from_slice(&data[row * stride..row * stride + w * 4]);
     }
     let light = edge_light(&bgra, w, h);
+    let small = Glimpse::of(&bgra, w, h);
     // gpui keeps image data as BGRA; the buffer type just says "4 bytes per pixel".
     let buf = image::RgbaImage::from_raw(w as u32, h as u32, bgra)?;
-    Some((Arc::new(RenderImage::new(smallvec![image::Frame::new(buf)])), light))
+    Some((Arc::new(RenderImage::new(smallvec![image::Frame::new(buf)])), light, small))
+}
+
+/// A frame shrunk to a grid [`Glimpse::ACROSS`] cells wide (its height keeping the frame's
+/// aspect), each cell the average colour under it: what the ambient light is made of.
+pub struct Glimpse {
+    /// Distinct per frame, to tell a new one from the last.
+    pub id: u64,
+    pub w: usize,
+    pub h: usize,
+    /// sRGB, 0..1, row by row.
+    pub rgb: Vec<[f32; 3]>,
+}
+
+impl Glimpse {
+    pub const ACROSS: usize = 36;
+    /// Samples per cell side: a sparse average is plenty under the blur it feeds.
+    const TAPS: usize = 4;
+
+    fn of(bgra: &[u8], w: usize, h: usize) -> Glimpse {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let gw = Self::ACROSS;
+        let gh = ((gw * h) as f32 / w.max(1) as f32).round().clamp(4., 128.) as usize;
+        let mut rgb = Vec::with_capacity(gw * gh);
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let mut sum = [0u32; 3];
+                for ty in 0..Self::TAPS {
+                    let y = ((gy * Self::TAPS + ty) * h / (gh * Self::TAPS)).min(h.saturating_sub(1));
+                    for tx in 0..Self::TAPS {
+                        let x = ((gx * Self::TAPS + tx) * w / (gw * Self::TAPS)).min(w.saturating_sub(1));
+                        let i = (y * w + x) * 4;
+                        sum[0] += bgra[i + 2] as u32;
+                        sum[1] += bgra[i + 1] as u32;
+                        sum[2] += bgra[i] as u32;
+                    }
+                }
+                let n = (Self::TAPS * Self::TAPS * 255) as f32;
+                rgb.push([sum[0] as f32 / n, sum[1] as f32 / n, sum[2] as f32 / n]);
+            }
+        }
+        Glimpse { id: NEXT.fetch_add(1, Ordering::Relaxed), w: gw, h: gh, rgb }
+    }
 }
 
 /// Share of near-white samples in the right fifth of a BGRA frame, over the lower two

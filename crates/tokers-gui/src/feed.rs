@@ -17,6 +17,7 @@ use tokers::TikTok;
 use tokers::endpoints::Feed;
 use tokers::models::Aweme;
 
+use crate::ambilight::Ambilight;
 use crate::comments::{CommentsEvent, CommentsView, Variant, avatar_el, is_long, more_toggle, rich};
 use crate::layout::{Layout, Mode, Rect, TITLEBAR};
 use crate::media::Images;
@@ -178,6 +179,7 @@ pub struct FeedView {
     photo: HashMap<String, usize>,
     pops: HashMap<&'static str, (String, usize)>,
     lens: Lens,
+    ambilight: Ambilight,
     /// How much the glyphs need a shadow: the picture under the buttons is light (0..1, eased).
     glyph_shadow: Spring,
     /// Presses per button (and the video they were on), keying each squish animation.
@@ -256,6 +258,7 @@ impl FeedView {
             photo: HashMap::new(),
             pops: HashMap::new(),
             lens: Lens::new(),
+            ambilight: Ambilight::new(),
             glyph_shadow: Spring::new(Springs::PANEL, 0.),
             presses: HashMap::new(),
             sidebar: true,
@@ -1128,7 +1131,33 @@ impl Render for FeedView {
             );
         }
 
-        let mut root = div().size_full().relative().child(stage);
+        // the video's own colours thrown around it, behind it
+        let prefs = Store::prefs(cx).clone();
+        let frame = self.current_player().and_then(|p| p.read(cx).glimpse());
+        let glow = if prefs.ambilight {
+            self.ambilight.update(frame, prefs.ambilight_reach(), prefs.ambilight_strength, window)
+        } else {
+            self.ambilight.update(None, prefs.ambilight_reach(), 0., window)
+        };
+        let glow = glow.map(|(image, reach)| {
+            // the picture as the column shows it (fitted, bars and all), the glow around that
+            let (w, h) = if reach.aspect > column.w / column.h {
+                (column.w, column.w / reach.aspect)
+            } else {
+                (column.h * reach.aspect, column.h)
+            };
+            let (x, y) = (column.x + (column.w - w) / 2., column.y + (column.h - h) / 2.);
+            img(image)
+                .absolute()
+                .left(px(x + reach.left * w))
+                .top(px(y + reach.top * h))
+                .w(px(reach.wide * w))
+                .h(px(reach.tall * h))
+                .object_fit(ObjectFit::Fill)
+                // the grid is coarse; a blur about a cell wide hides its steps
+                .blur(px(h / 48.))
+        });
+        let mut root = div().size_full().relative().children(glow).child(stage);
 
         self.lens.tick(window, cx);
         // white glyphs over a light picture get a shadow; eased, so a flickering frame doesn't blink it
