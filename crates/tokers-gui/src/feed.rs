@@ -34,16 +34,16 @@ const WHEEL_COOLDOWN: Duration = Duration::from_millis(260);
 const SWIPE_COMMIT: f32 = 0.18;
 const GESTURE_GAP: Duration = Duration::from_millis(160);
 /// The comments panel has no background of its own: the glow beside the video dies out
-/// this far into it (px, negative: short of it), on its own curve, rather than lying under
-/// the text. The glow's blur still carries a little of it a few cells past that point.
-const GLOW_INTO_PANEL: f32 = -16.;
+/// this far into it (px), on its own curve, rather than lying under the text.
+const GLOW_INTO_PANEL: f32 = 24.;
 /// The cover-coloured backdrop (`ambient`) shows through the panel, dimmed from this far
 /// left of its edge...
 const VEIL_LEAD: f32 = 40.;
 /// ...over this share of the panel (past the lead)...
 const VEIL_REACH: f32 = 0.5;
-/// ...to the titlebar's dimness (share of the window background), so the two meet evenly.
-const VEIL_DIM: f32 = 0.35;
+/// ...to this dimness (share of the window background); the titlebar above keeps its own
+/// lighter one, its border line marks the step.
+const VEIL_DIM: f32 = 0.7;
 /// The dimming is eased (gradients are linear, two stops): drawn in this many pieces.
 const VEIL_STEPS: usize = 12;
 /// How long a video stays current before its comments are fetched.
