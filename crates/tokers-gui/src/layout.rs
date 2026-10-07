@@ -4,7 +4,8 @@
 //! either wholly beside the video or wholly on it, never half over its edge:
 //!
 //! * wide: video anchored left at full height, buttons beside it, comments panel;
-//! * medium: the video with its buttons beside it, centred as one group;
+//! * medium: the video centred on its own, the buttons beside it; once the buttons
+//!   would run off the right edge, the video moves left to keep them in;
 //! * overlay, once that group no longer fits: the video centred alone, the buttons
 //!   inside its right edge like the phone app; narrower than the column itself,
 //!   the column scales down (bars above and below).
@@ -131,9 +132,10 @@ impl Layout {
         let w = full_w.min(avail);
         let h = w * 16. / 9.;
         let (x, actions_x, beside) = if mode == Mode::Medium {
-            // the video and its buttons, centred as a group (should the group not
-            // fit while the view animates away from here, the buttons stop at the edge)
-            let x = left + ((avail - ACTIONS - w) / 2.).max(0.);
+            // the video centred by itself; when the buttons beside it would leave the
+            // window, it moves over to make room for them (should even that not fit while
+            // the view animates away from here, the buttons stop at the edge)
+            let x = (left + (avail - w) / 2.).min(width - ACTIONS - w).max(left);
             (x, (x + w).min(width - ACTIONS), 1.)
         } else {
             let x = left + (avail - w) / 2.;
@@ -209,13 +211,22 @@ mod tests {
     }
 
     #[test]
-    fn medium_centres_the_video_with_its_buttons() {
-        let l = at(COL + ACTIONS + 200.);
+    fn medium_centres_the_video_alone() {
+        let l = at(COL + 400.);
         assert_eq!(l.mode, Mode::Medium);
         assert_eq!(l.beside, 1.);
-        assert_eq!(l.video.x, 100.);
-        assert_eq!(l.actions.unwrap().x, 100. + COL);
+        assert_eq!(l.video.x, 200.);
+        assert_eq!(l.actions.unwrap().x, 200. + COL);
         assert_eq!(l.video.h, 720.);
+    }
+
+    #[test]
+    fn medium_moves_the_video_over_to_keep_the_buttons_in() {
+        // centred, the buttons would stick out by 20 px
+        let l = at(COL + 2. * ACTIONS - 40.);
+        assert_eq!(l.mode, Mode::Medium);
+        assert_eq!(l.video.x, ACTIONS - 40.);
+        assert_eq!(l.actions.unwrap().x + ACTIONS, COL + 2. * ACTIONS - 40.);
     }
 
     #[test]
