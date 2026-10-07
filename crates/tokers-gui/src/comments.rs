@@ -3,13 +3,13 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Bounds, Context, Entity, EventEmitter, FontWeight, Hsla, ListAlignment, ListScrollEvent,
     ListState, MouseButton, ObjectFit, Pixels, Render, ScrollWheelEvent, SharedString, Size, SpringConfig,
-    Window, anchored,
+    Task, Window, anchored,
     canvas, deferred, div, img, list, point, px,
 };
 use tokers::TikTok;
@@ -29,6 +29,8 @@ const PRELOAD_SHARE: f32 = 0.5;
 const ROW_MIN: f32 = 56.;
 /// Fetch the next page when the last loaded comment is this many rows away.
 const PREFETCH_ROWS: usize = 8;
+/// Resting on "Ответы" this long fetches the replies before the click (passing over doesn't).
+const THREAD_DWELL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
@@ -145,6 +147,8 @@ pub struct CommentsView {
     /// Pages a filter has fetched by itself since it was picked.
     filter_pages: u32,
     sort_open: bool,
+    /// The fetch "Ответы" makes once the pointer has rested on it; leaving drops it.
+    dwell: Option<Task<()>>,
     /// Where the title (the way to the menu, which hangs under it) was painted.
     title_at: Rc<Cell<Bounds<Pixels>>>,
 }
@@ -204,6 +208,7 @@ impl CommentsView {
             shown: Vec::new(),
             filter_pages: 0,
             sort_open: false,
+            dwell: None,
             title_at: Rc::default(),
         };
         if fetch_after.is_zero() {
@@ -381,11 +386,24 @@ impl CommentsView {
         cx.notify();
     }
 
-    /// Hovering "Ответы" fetches the first page, so a click opens it at once.
+    /// Resting on "Ответы" (or pressing it) fetches the first page, so the click opens it
+    /// with the replies in.
     fn preload_thread(&mut self, cid: &str, cx: &mut Context<Self>) {
+        self.dwell = None;
         if self.thread(cid).items.is_empty() {
             self.load_replies(cid.to_string(), cx);
         }
+    }
+
+    fn dwell_on_thread(&mut self, cid: String, hovered: bool, cx: &mut Context<Self>) {
+        if !hovered {
+            self.dwell = None;
+            return;
+        }
+        self.dwell = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(THREAD_DWELL).await;
+            this.update(cx, |this, cx| this.preload_thread(&cid, cx)).ok();
+        }));
     }
 
     /// A second click on the same mark takes it back; the other mark replaces it.
@@ -735,6 +753,7 @@ impl CommentsView {
             };
             let toggle_id = cid.clone();
             let hover_id = cid.clone();
+            let press_id = cid.clone();
             let toggle = div()
                     .id(SharedString::from(format!("thread-{cid}")))
                     // as wide as its words: the empty space beside it is not a button
@@ -756,10 +775,12 @@ impl CommentsView {
                             .text_color(theme.muted_foreground),
                     )
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered {
-                            this.preload_thread(&hover_id, cx);
-                        }
+                        this.dwell_on_thread(hover_id.clone(), *hovered, cx)
                     }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| this.preload_thread(&press_id, cx)),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_thread(&toggle_id, cx)));
             // the toggle and its replies as one child of the row: no gap opens before the
             // replies have any height
