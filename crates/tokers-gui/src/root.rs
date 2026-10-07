@@ -19,7 +19,7 @@ use crate::motion::{Motion, Motioned as _, Rising as _, Spring, Springs, Veiling
 use crate::scrollbar::Scrollbar;
 use crate::state::{CommentsMode, Store, downloads_dir};
 use crate::theme::{ActiveTheme as _, Palette, Text, Theme};
-use crate::ui::{Button, icon, window_controls, window_frame, window_radius};
+use crate::ui::{Button, icon, slider, window_controls, window_frame, window_radius};
 use crate::*;
 
 const ROW: f32 = 36.;
@@ -578,54 +578,15 @@ impl Root {
 
     fn settings(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
-        let mode = Store::prefs(cx).comments_mode;
+        let prefs = Store::prefs(cx).clone();
+        let mode = prefs.comments_mode;
         let option = |id: &'static str, value: CommentsMode, title: &'static str, about: &'static str| {
-            let on = mode == value;
-            div()
-                .id(id)
-                .flex()
-                .items_start()
-                .gap_3()
-                .p_3()
-                .rounded(px(8.))
-                .border_1()
-                .border_color(if on { theme.primary.opacity(0.6) } else { theme.border })
-                .bg(if on { theme.secondary } else { gpui::transparent_black() })
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.secondary_hover))
-                .child(
-                    div()
-                        .mt_0p5()
-                        .size(px(16.))
-                        .flex_none()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(if on { theme.primary } else { theme.muted_foreground })
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .when(on, |el| {
-                            el.child(div().size(px(8.)).rounded_full().bg(theme.primary).motion(
-                                SharedString::from(format!("radio-{id}")),
-                                Motion::Quick,
-                                |el, t| el.layer_scale(t),
-                            ))
-                        }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .child(div().font_weight(FontWeight::MEDIUM).child(title))
-                        .child(
-                            div()
-                                .text_size(theme.text(Text::Small))
-                                .text_color(theme.muted_foreground)
-                                .child(about),
-                        ),
-                )
+            choice(id, mode == value, title, about, &theme)
                 .on_click(move |_, _, cx| Store::update_prefs(cx, |p| p.comments_mode = value))
+        };
+        let glass = |id: &'static str, value: bool, title: &'static str, about: &'static str| {
+            choice(id, prefs.liquid_glass == value, title, about, &theme)
+                .on_click(move |_, _, cx| Store::update_prefs(cx, |p| p.liquid_glass = value))
         };
         let keys: [(&str, &str); 12] = [
             ("J / ↓", "следующее видео"),
@@ -668,6 +629,46 @@ impl Root {
                             )),
                     )
 
+                    .child(
+                        section("Кнопки у видео", &theme)
+                            .child(glass(
+                                "glass-liquid",
+                                true,
+                                "Жидкое стекло",
+                                "Край кнопки преломляет видео под ней, по ободку бежит блик. Линза пока есть только на Linux.",
+                            ))
+                            .child(glass(
+                                "glass-frosted",
+                                false,
+                                "Матовое стекло",
+                                "Кнопки просто размывают то, что под ними.",
+                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .pt_1()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .justify_between()
+                                            .child(div().font_weight(FontWeight::MEDIUM).child("Прозрачность"))
+                                            .child(
+                                                div()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(format!("{}%", (prefs.button_clarity * 100.).round())),
+                                            ),
+                                    )
+                                    .child(slider(
+                                        "button-clarity",
+                                        prefs.button_clarity,
+                                        |v, cx| Store::tweak_prefs(cx, |p| p.button_clarity = v),
+                                        Store::save_prefs,
+                                        cx,
+                                    )),
+                            ),
+                    )
                     .child(
                         section("Клавиши", &theme).child(div().grid().grid_cols(2).gap_x_6().gap_y_2().children(keys.iter().map(
                             |(k, what)| {
@@ -740,6 +741,57 @@ fn heading(title: &str, sub: String, theme: &Theme) -> impl IntoElement {
             div().text_size(theme.text(Text::Title)).font_weight(FontWeight::BOLD).child(title.to_string()),
         )
         .child(div().text_color(theme.muted_foreground).child(sub))
+}
+
+/// A radio row: a dot, a title and a line about it.
+fn choice(
+    id: &'static str,
+    on: bool,
+    title: &'static str,
+    about: &'static str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_start()
+        .gap_3()
+        .p_3()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(if on { theme.primary.opacity(0.6) } else { theme.border })
+        .bg(if on { theme.secondary } else { gpui::transparent_black() })
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.secondary_hover))
+        .child(
+            div()
+                .mt_0p5()
+                .size(px(16.))
+                .flex_none()
+                .rounded_full()
+                .border_1()
+                .border_color(if on { theme.primary } else { theme.muted_foreground })
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(on, |el| {
+                    el.child(div().size(px(8.)).rounded_full().bg(theme.primary).motion(
+                        SharedString::from(format!("radio-{id}")),
+                        Motion::Quick,
+                        |el, t| el.layer_scale(t),
+                    ))
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                .child(
+                    div().text_size(theme.text(Text::Small)).text_color(theme.muted_foreground).child(about),
+                ),
+        )
 }
 
 fn section(label: &str, theme: &Theme) -> gpui::Div {

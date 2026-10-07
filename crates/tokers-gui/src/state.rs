@@ -27,11 +27,22 @@ pub struct Prefs {
     pub volume: f32,
     pub muted: bool,
     pub sidebar: bool,
+    /// The buttons over the video are liquid glass (a refracting lens) rather than frosted.
+    pub liquid_glass: bool,
+    /// How see-through the button faces are, 0 (solid) to 1 (clear).
+    pub button_clarity: f32,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { comments_mode: CommentsMode::Sheet, volume: 0.8, muted: false, sidebar: true }
+        Prefs {
+            comments_mode: CommentsMode::Sheet,
+            volume: 0.8,
+            muted: false,
+            sidebar: true,
+            liquid_glass: true,
+            button_clarity: 0.75,
+        }
     }
 }
 
@@ -46,6 +57,8 @@ pub struct Library {
 pub struct Store {
     pub prefs: Prefs,
     pub library: Library,
+    /// Prefs changed by [`Store::tweak_prefs`] and not yet written.
+    unsaved: bool,
 }
 
 struct StoreGlobal(Entity<Store>);
@@ -54,7 +67,8 @@ impl Global for StoreGlobal {}
 
 impl Store {
     pub fn init(cx: &mut App) {
-        let store = cx.new(|_| Store { prefs: load(&prefs_path()), library: load(&library_path()) });
+        let store =
+            cx.new(|_| Store { prefs: load(&prefs_path()), library: load(&library_path()), unsaved: false });
         cx.set_global(StoreGlobal(store));
     }
 
@@ -71,6 +85,24 @@ impl Store {
             f(&mut store.prefs);
             save(&prefs_path(), &store.prefs);
             cx.notify();
+        });
+    }
+
+    /// Changes prefs without writing them, for a value that moves continuously (a slider);
+    /// [`Store::save_prefs`] writes them once it settles.
+    pub fn tweak_prefs(cx: &mut App, f: impl FnOnce(&mut Prefs)) {
+        Self::entity(cx).update(cx, |store, cx| {
+            f(&mut store.prefs);
+            store.unsaved = true;
+            cx.notify();
+        });
+    }
+
+    pub fn save_prefs(cx: &mut App) {
+        Self::entity(cx).update(cx, |store, _| {
+            if std::mem::take(&mut store.unsaved) {
+                save(&prefs_path(), &store.prefs);
+            }
         });
     }
 

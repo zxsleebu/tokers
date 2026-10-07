@@ -148,6 +148,24 @@ impl Spring {
         self.config.is_settled(self.state, self.target, self.epsilon)
     }
 
+    /// Where it is now (as of the last tick).
+    pub fn value(&self) -> f32 {
+        self.state.position
+    }
+
+    /// Units per second, signed.
+    pub fn velocity(&self) -> f32 {
+        self.state.velocity
+    }
+
+    /// Adds an impulse: the spring swings away and back (a press, a landing).
+    pub fn kick(&mut self, velocity: f32) {
+        if self.settled() {
+            self.stepped = Instant::now();
+        }
+        self.state.velocity += velocity;
+    }
+
     /// Advance to now and return the value; asks for another frame until it rests.
     pub fn tick(&mut self, window: &mut Window, cx: &App) -> f32 {
         let now = Instant::now();

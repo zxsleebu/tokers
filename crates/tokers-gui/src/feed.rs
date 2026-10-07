@@ -1,15 +1,17 @@
 //! The watch screen: a vertical pager of videos (or one list, like favourites),
 //! the action buttons beside them and the comments, placed by [`Layout`].
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::AnimationExt as _;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, AnyView, Context, Entity, EventEmitter, FontWeight, Hsla, MouseButton, ObjectFit, Pixels,
-    Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, StyleRefinement, TouchPhase, Window, div, img,
-    linear_color_stop, linear_gradient, px, size,
+    AnyElement, AnyView, Bounds, Context, Entity, EventEmitter, FontWeight, Hsla, MouseButton, ObjectFit,
+    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, SpringConfig, StyleRefinement,
+    TouchPhase, Window, canvas, div, img, linear_color_stop, linear_gradient, px, size,
 };
 use tokers::TikTok;
 use tokers::endpoints::Feed;
@@ -32,8 +34,111 @@ const SWIPE_COMMIT: f32 = 0.18;
 const GESTURE_GAP: Duration = Duration::from_millis(160);
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
-/// How hard the button faces blur what is behind them.
-const FACE_BLUR: gpui::Pixels = px(10.);
+/// How hard the button faces blur what is behind them: little, liquid glass is mostly clear.
+const FACE_BLUR: gpui::Pixels = px(5.);
+/// Frosted faces (liquid glass turned off) blur harder instead.
+const FROST_BLUR: gpui::Pixels = px(10.);
+/// The button faces' lens: the rim pulls the picture in from behind, with a glint on top.
+const FACE_GLASS: gpui::Glass =
+    gpui::Glass { refraction: px(16.), bevel: px(10.), dispersion: 0.2, highlight: 2.5 };
+/// The drop behind the hovered button bends harder.
+const LENS_GLASS: gpui::Glass =
+    gpui::Glass { refraction: px(22.), bevel: px(14.), dispersion: 0.3, highlight: 3. };
+const FACE: f32 = 48.;
+/// The drop behind the hovered button is this much wider than a face.
+const LENS_GROW: f32 = 10.;
+/// The drop's slide between buttons: a little underdamped, so it overshoots as it lands.
+const LENS_SLIDE: SpringConfig = SpringConfig::new(420., 26., 1.);
+/// Its size: settles in with only a slight swell when it appears, and sinks on a press.
+const LENS_POP: SpringConfig = SpringConfig::new(520., 30., 1.);
+/// How much smaller the drop gets at full speed between buttons.
+const LENS_SHRINK: f32 = 0.18;
+/// Its width and height apart: loosely damped, so the drop jiggles like jelly after it moves.
+const LENS_JELLY: SpringConfig = SpringConfig::new(650., 12., 1.);
+/// Speed (px/s) at which the drop is stretched by half.
+const LENS_STRETCH_SPEED: f32 = 1600.;
+/// A pressed face squeezes in and springs back past its size.
+const SQUISH: Duration = Duration::from_millis(560);
+
+/// The glass drop behind the hovered button of the current stack, moved by springs as in
+/// Sonora (state stepped every frame, velocity kept across retargets): it flows from button to
+/// button stretched by its own speed, jiggles when it stops, pops in and out, and sinks under a
+/// press.
+struct Lens {
+    hovered: Option<&'static str>,
+    y: Spring,
+    pop: Spring,
+    wide: Spring,
+    tall: Spring,
+    /// Where each face of the current stack was painted, and the stack itself.
+    faces: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
+    origin: Rc<Cell<Point<Pixels>>>,
+    x: f32,
+    /// This frame's drop.
+    now: Drop,
+}
+
+/// One frame of the drop, relative to the stack.
+#[derive(Clone, Copy)]
+struct Drop {
+    x: f32,
+    y: f32,
+    size: f32,
+    wide: f32,
+    tall: f32,
+}
+
+impl Lens {
+    fn new() -> Self {
+        Lens {
+            hovered: None,
+            y: Spring::new(LENS_SLIDE, 0.),
+            pop: Spring::new(LENS_POP, 0.),
+            wide: Spring::new(LENS_JELLY, 1.),
+            tall: Spring::new(LENS_JELLY, 1.),
+            faces: Rc::default(),
+            origin: Rc::default(),
+            x: 0.,
+            now: Drop { x: 0., y: 0., size: 0., wide: 1., tall: 1. },
+        }
+    }
+
+    fn tick(&mut self, window: &mut Window, cx: &gpui::App) {
+        let origin = self.origin.get();
+        let face = self.hovered.and_then(|key| self.faces.borrow().get(key).copied());
+        if let Some(b) = face {
+            let target = f32::from(b.origin.y - origin.y);
+            self.x = f32::from(b.origin.x - origin.x);
+            if self.pop.value() < 0.05 {
+                // appear where the pointer is rather than slide in from the last spot
+                self.y.snap(target);
+            }
+            self.y.set(target);
+        }
+        let y = self.y.tick(window, cx);
+        let speed = (self.y.velocity().abs() / LENS_STRETCH_SPEED).min(1.2);
+        // it draws in a little on the way between buttons and fills out as it lands
+        self.pop.set(if face.is_some() { 1. - LENS_SHRINK * speed.min(1.) } else { 0. });
+        // stretched along its way by its own speed, thinned to keep its volume
+        let stretch = 1. + 0.5 * speed;
+        self.tall.set(stretch);
+        self.wide.set(1. / stretch.sqrt());
+        self.now = Drop {
+            x: self.x,
+            y,
+            size: self.pop.tick(window, cx).max(0.),
+            wide: self.wide.tick(window, cx),
+            tall: self.tall.tick(window, cx),
+        };
+    }
+
+    /// A press: the drop sinks and splats sideways, then bounces back.
+    fn press(&mut self) {
+        self.pop.kick(-4.);
+        self.wide.kick(5.);
+        self.tall.kick(-5.);
+    }
+}
 
 pub const COVER_PX: u32 = 720;
 
@@ -72,6 +177,11 @@ pub struct FeedView {
     swipe_gen: u64,
     photo: HashMap<String, usize>,
     pops: HashMap<&'static str, (String, usize)>,
+    lens: Lens,
+    /// How much the glyphs need a shadow: the picture under the buttons is light (0..1, eased).
+    glyph_shadow: Spring,
+    /// Presses per button (and the video they were on), keying each squish animation.
+    presses: HashMap<&'static str, (String, usize)>,
     pub sidebar: bool,
     viewport: Size<Pixels>,
     current_since: Instant,
@@ -145,6 +255,9 @@ impl FeedView {
             swipe_gen: 0,
             photo: HashMap::new(),
             pops: HashMap::new(),
+            lens: Lens::new(),
+            glyph_shadow: Spring::new(Springs::PANEL, 0.),
+            presses: HashMap::new(),
             sidebar: true,
             viewport: size(px(720.), px(1280.)),
             current_since: Instant::now(),
@@ -632,47 +745,135 @@ impl FeedView {
             Some(format!("https://www.tiktok.com/music/x-{}", aweme.music.music_id()))
         };
         let fg = mix(gpui::white(), theme.foreground, beside);
-        let face_bg = mix(gpui::black().opacity(0.18), theme.secondary, beside);
-        let face_hover = mix(gpui::black().opacity(0.32), theme.secondary_active, beside);
+        let over = 1. - beside;
+        let prefs = Store::prefs(cx);
+        let (liquid, clarity) = (prefs.liquid_glass, prefs.button_clarity.clamp(0., 1.));
+        let face_bg = mix(
+            gpui::black().opacity(0.32 * (1. - clarity)),
+            theme.secondary.opacity(1. - 0.55 * clarity),
+            beside,
+        );
+        let face_hover = mix(gpui::white().opacity(0.14), theme.secondary_active, beside);
         let label = mix(gpui::white(), theme.muted_foreground, beside);
-        let ring = theme.border.opacity(theme.border.a * beside);
+        // the lens draws its own glint; beside the video a hairline keeps the face on flat paint
+        let rim = theme.border.opacity(theme.border.a * beside);
         // over the picture the counts need a shadow to stay readable on light frames
         let shadow = gpui::TextShadow {
-            color: gpui::black().opacity(0.6 * (1. - beside)),
+            color: gpui::black().opacity(0.6 * over),
             offset: gpui::point(px(0.), px(1.)),
             blur: px(3.),
         };
         let pop = |what: &str| self.pops.get(what).filter(|(pid, _)| *pid == id).map(|(_, n)| *n);
+        let faces = self.lens.faces.clone();
+        let drop = self.lens.now;
+        let origin_at = self.lens.origin.get();
+        // A face lights up as the drop arrives under it, not on its own hover: by how close
+        // the drop is and how full it has grown.
+        let glow = |key: &'static str| {
+            let Some(face) = self.lens.faces.borrow().get(key).copied() else { return 0. };
+            let at = f32::from(face.origin.y - origin_at.y);
+            (1. - (drop.y - at).abs() / (FACE * 0.8)).clamp(0., 1.) * drop.size.clamp(0., 1.)
+        };
+        let shade = self.glyph_shadow.value() * over;
 
-        let button =
-            |key: &'static str, path: &'static str, count: String, color: Hsla, popped: Option<usize>| {
-                let glyph = icon(path).size(px(24.)).text_color(color);
-                let face = div()
-                    .size(px(48.))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(face_bg)
-                    .backdrop_blur(FACE_BLUR)
-                    .border_1()
-                    .border_color(ring)
-                    .hover(move |s| s.bg(face_hover))
-                    .child(match popped {
-                        Some(n) => glyph
-                            .with_animation(
-                                SharedString::from(format!("pop-{key}-{n}")),
-                                gpui::Animation::new(Duration::from_millis(420)),
-                                |el, t| {
-                                    // a quick overshoot: 1 → 1.35 → 1
-                                    let s = 1. + 0.35 * (t * std::f32::consts::PI).sin() * (1. - t);
-                                    el.with_transformation(gpui::Transformation::scale(gpui::size(s, s)))
-                                },
+        let button = |key: &'static str,
+                      path: &'static str,
+                      count: String,
+                      color: Hsla,
+                      popped: Option<usize>,
+                      cx: &mut Context<Self>| {
+            let glyph = icon(path).size(px(24.)).text_color(color);
+            let lit = if current { glow(key) } else { 0. };
+            let glass = div()
+                .absolute()
+                .inset_0()
+                .rounded_full()
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(mix(face_bg, face_hover, lit))
+                .backdrop_blur(if liquid { FACE_BLUR } else { FROST_BLUR })
+                .when(liquid, |el| el.backdrop_glass(FACE_GLASS))
+                .border_1()
+                .border_color(rim)
+                // a soft shadow under the glyph for white on white: a dark copy, blurred, with a
+                // tighter one for the shape and a wide one for the haze
+                .when(shade > 0.01, |el| {
+                    let copy = |blur: f32, down: f32, alpha: f32| {
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .mt(px(down))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .blur(px(blur))
+                            .child(icon(path).size(px(24.)).text_color(gpui::black().opacity(alpha * shade)))
+                    };
+                    el.child(copy(3.5, 1., 0.6)).child(copy(1.5, 1., 0.5))
+                })
+                .child(match popped {
+                    Some(n) => glyph
+                        .with_animation(
+                            SharedString::from(format!("pop-{key}-{n}")),
+                            gpui::Animation::new(Duration::from_millis(420)),
+                            |el, t| {
+                                // a quick overshoot: 1 → 1.35 → 1
+                                let s = 1. + 0.35 * (t * std::f32::consts::PI).sin() * (1. - t);
+                                el.with_transformation(gpui::Transformation::scale(gpui::size(s, s)))
+                            },
+                        )
+                        .into_any_element(),
+                    None => glyph.into_any_element(),
+                });
+            let pressed = self.presses.get(key).filter(|(pid, _)| *pid == id).map(|(_, n)| *n);
+            let glass = match pressed {
+                // squeezed in, then a damped bounce back past its size
+                Some(n) => glass
+                    .with_animation(
+                        SharedString::from(format!("squish-{key}-{n}")),
+                        gpui::Animation::new(SQUISH),
+                        |el, t| {
+                            let s = 1. - 0.16 * (-5. * t).exp() * (3. * std::f32::consts::PI * t).cos();
+                            let d = px((1. - s) * FACE / 2.);
+                            el.top(d).left(d).right(d).bottom(d)
+                        },
+                    )
+                    .into_any_element(),
+                _ => glass.into_any_element(),
+            };
+            let faces = faces.clone();
+            div()
+                .id(key)
+                // the gap between buttons is half each one's padding, not space between them:
+                // the hover areas meet, so the drop flows from one to the next without letting go
+                .py_2()
+                .w(px(FACE + 16.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .child(
+                    div()
+                        .relative()
+                        .size(px(FACE))
+                        .when(current, |el| {
+                            el.child(
+                                canvas(
+                                    move |bounds, _, _| {
+                                        faces.borrow_mut().insert(key, bounds);
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .inset_0(),
                             )
-                            .into_any_element(),
-                        None => glyph.into_any_element(),
-                    });
-                div().id(key).flex().flex_col().items_center().gap_1().cursor_pointer().child(face).child(
+                        })
+                        .child(glass),
+                )
+                .child(
                     div()
                         .text_size(theme.text(Text::Tiny))
                         .font_weight(FontWeight::SEMIBOLD)
@@ -680,7 +881,56 @@ impl FeedView {
                         .when(beside < 0.999, |el| el.text_shadow([shadow]))
                         .child(count),
                 )
-            };
+                .when(current, |el| {
+                    el.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.lens.hovered = Some(key);
+                        } else if this.lens.hovered == Some(key) {
+                            this.lens.hovered = None;
+                        }
+                        cx.notify();
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            let Some(id) = this.current().map(|a| a.aweme_id.clone()) else { return };
+                            let entry = this.presses.entry(key).or_insert((id.clone(), 0));
+                            *entry = (id, entry.1 + 1);
+                            this.lens.press();
+                            cx.notify();
+                        }),
+                    )
+                })
+        };
+
+        // The drop: wider than a face, its size and shape on springs (see `Lens`). Painted by
+        // hand at the springs' exact values, off the pixel grid: laid out, it would walk in
+        // whole pixels and tick into place as the springs let go.
+        let lens = (current && drop.size > 0.01).then(|| {
+            let fill = 0.04 + 0.14 * (1. - clarity);
+            let color = mix(gpui::white().opacity(fill), theme.foreground.opacity(fill * 0.6), beside);
+            let (blur, glass) = if liquid { (px(3.), Some(LENS_GLASS)) } else { (px(12.), None) };
+            canvas(
+                |_, _, _| {},
+                move |stack, _, window, _| {
+                    let base = (FACE + LENS_GROW) * drop.size;
+                    let size = gpui::size(px(base * drop.wide), px(base * drop.tall));
+                    let centre = stack.origin + gpui::point(px(drop.x + FACE / 2.), px(drop.y + FACE / 2.));
+                    let bounds = Bounds::new(centre - gpui::point(size.width / 2., size.height / 2.), size);
+                    let radius = gpui::Corners::all(size.width.min(size.height) / 2.);
+                    window.with_subpixel_paint(|window| {
+                        // the whole drop fades as it shrinks away, its lens included
+                        window.with_opacity(drop.size.min(1.), |window| {
+                            window.paint_glass_backdrop(bounds, radius, blur, glass);
+                            window.paint_quad(gpui::fill(bounds, color).corner_radii(radius));
+                        })
+                    });
+                },
+            )
+            .absolute()
+            .inset_0()
+        });
+        let origin = self.lens.origin.clone();
 
         let accent = theme.primary;
         div()
@@ -688,15 +938,23 @@ impl FeedView {
             // over the video, a click is for the button, not the play toggle under it;
             // the wheel still pages
             .block_mouse_except_scroll()
+            .relative()
             .flex()
             .flex_col()
             .items_center()
-            .gap_4()
+            .when(current, |el| {
+                el.child(
+                    canvas(move |bounds, _, _| origin.set(bounds.origin), |_, _, _, _| {})
+                        .absolute()
+                        .inset_0(),
+                )
+            })
+            .children(lens)
             .child(
                 div()
                     .id("author")
                     .relative()
-                    .mb_2()
+                    .mb_4()
                     .cursor_pointer()
                     .child(div().rounded_full().border_2().border_color(fg).child(avatar_el(
                         avatar,
@@ -727,11 +985,12 @@ impl FeedView {
                     compact(s.digg_count + u64::from(liked)),
                     if liked { accent } else { fg },
                     pop("like"),
+                    cx,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_like(cx))),
             )
             .child(
-                button("comments", "icons/message-circle.svg", compact(s.comment_count), fg, None)
+                button("comments", "icons/message-circle.svg", compact(s.comment_count), fg, None, cx)
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_comments(window, cx))),
             )
             .child(
@@ -741,19 +1000,20 @@ impl FeedView {
                     compact(s.collect_count + u64::from(saved)),
                     if saved { accent } else { fg },
                     pop("save"),
+                    cx,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_favourite(cx))),
             )
             .child(
-                button("share", "icons/forward.svg", compact(s.share_count), fg, None)
+                button("share", "icons/forward.svg", compact(s.share_count), fg, None, cx)
                     .on_click(cx.listener(|this, _, _, cx| this.copy_link(cx))),
             )
-            .child(sound_disc(
+            .child(div().mt_2().child(sound_disc(
                 music_cover,
                 music,
                 current && self.current_player().is_some_and(|p| p.read(cx).is_playing()),
                 theme.secondary,
-            ))
+            )))
             .into_any_element()
     }
 }
@@ -870,6 +1130,11 @@ impl Render for FeedView {
 
         let mut root = div().size_full().relative().child(stage);
 
+        self.lens.tick(window, cx);
+        // white glyphs over a light picture get a shadow; eased, so a flickering frame doesn't blink it
+        let light = self.current_player().map_or(0., |p| p.read(cx).edge_light());
+        self.glyph_shadow.set(((light - 0.06) / 0.24).clamp(0., 1.));
+        self.glyph_shadow.tick(window, cx);
         if let Some(actions) = closed.actions.filter(|_| sheet_t < 0.99) {
             let stacks: Vec<AnyElement> = (lo..=hi)
                 .filter(|&i| in_view(i))

@@ -313,3 +313,87 @@ mod tests {
         assert_eq!(super::compact(3_400_000), "3.4M");
     }
 }
+
+// ── slider (after Sonora's scrubber) ──
+
+/// What a slider drag carries, to tell its own drags from other sliders'.
+#[derive(Clone)]
+struct Grab(SharedString);
+
+impl gpui::Render for Grab {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+type Slide = std::rc::Rc<dyn Fn(f32, &mut App)>;
+type Done = std::rc::Rc<dyn Fn(&mut App)>;
+
+/// A horizontal slider over 0..1: press anywhere on it or drag the thumb. `on_change` gets the
+/// value as it moves; `on_release` runs when the button comes up (a place to save it).
+pub fn slider(
+    id: impl Into<SharedString>,
+    value: f32,
+    on_change: impl Fn(f32, &mut App) + 'static,
+    on_release: impl Fn(&mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let id: SharedString = id.into();
+    let value = value.clamp(0., 1.);
+    let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<Pixels>::default()));
+    let on_change: Slide = std::rc::Rc::new(on_change);
+    let on_release: Done = std::rc::Rc::new(on_release);
+    let at = |x: Pixels, bounds: gpui::Bounds<Pixels>| {
+        ((x - bounds.origin.x) / bounds.size.width.max(px(1.))).clamp(0., 1.)
+    };
+    let (pressed, dragged) = (on_change.clone(), on_change);
+    let (up, up_out) = (on_release.clone(), on_release);
+    let (press_bounds, mine) = (bounds.clone(), id.clone());
+    div()
+        .id(ElementId::Name(id.clone()))
+        .relative()
+        .h(px(20.))
+        .w_full()
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .group("slider")
+        .child(gpui::canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().inset_0())
+        .child(
+            div().relative().w_full().h(px(4.)).rounded_full().bg(theme.secondary).child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(gpui::relative(value))
+                    .rounded_full()
+                    .bg(theme.primary),
+            ),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(gpui::relative(value))
+                .ml(px(-8.))
+                .size(px(16.))
+                .rounded_full()
+                .bg(theme.foreground)
+                .border_2()
+                .border_color(theme.primary)
+                .group_hover("slider", |s| s.size(px(18.)).ml(px(-9.))),
+        )
+        .on_mouse_down(MouseButton::Left, move |e, _, cx| {
+            cx.stop_propagation();
+            pressed(at(e.position.x, press_bounds.get()), cx);
+        })
+        .on_drag(Grab(id), |grab, _, _, cx| cx.new(|_| grab.clone()))
+        .on_drag_move(move |e: &gpui::DragMoveEvent<Grab>, _, cx| {
+            if e.drag(cx).0 == mine {
+                dragged(at(e.event.position.x, e.bounds), cx);
+            }
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| up(cx))
+        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| up_out(cx))
+}

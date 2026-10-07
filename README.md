@@ -1,6 +1,6 @@
 # tokers
 
-Native TikTok client for Linux, written in Rust with [gpui](https://github.com/nolight132/gpui).
+Native TikTok client for Linux, written in Rust with [gpui](https://github.com/zxsleebu/gpui).
 
 ```
 crates/

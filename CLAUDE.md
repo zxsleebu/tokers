@@ -1,7 +1,7 @@
 # tokers
 
 Native TikTok client in Rust: `crates/tokers` (API client library) and
-`crates/tokers-gui` (the app, built on the gpui fork github.com/nolight132/gpui,
+`crates/tokers-gui` (the app, built on the gpui fork github.com/zxsleebu/gpui,
 pinned by rev in `Cargo.toml`).
 
 ## Request signing lives outside this repository

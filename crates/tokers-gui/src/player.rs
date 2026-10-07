@@ -8,7 +8,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
@@ -52,6 +52,9 @@ pub enum Status {
 pub struct VideoPlayer {
     pipeline: Option<gst::Element>,
     latest: Arc<Mutex<Option<Arc<RenderImage>>>>,
+    /// How much of the strip under the action buttons is near white in the latest frame
+    /// (`f32` bits): white glyphs over it need a shadow.
+    edge_light: Arc<AtomicU32>,
     /// Frame painted last; dropped from the atlas once a newer one replaces it.
     shown: Option<Arc<RenderImage>>,
     status: Status,
@@ -88,6 +91,7 @@ impl VideoPlayer {
         let mut this = VideoPlayer {
             pipeline: None,
             latest: Arc::default(),
+            edge_light: Arc::default(),
             shown: None,
             status: Status::Loading,
             want_play: play,
@@ -133,10 +137,12 @@ impl VideoPlayer {
         let (tx, mut rx) = mpsc::unbounded::<()>();
         let pending = Arc::new(AtomicBool::new(false));
         let latest = self.latest.clone();
+        let edge_light = self.edge_light.clone();
         let pending_cb = pending.clone();
         let deliver = Arc::new(move |sample: &gst::Sample| {
-            if let Some(image) = to_render_image(sample) {
+            if let Some((image, light)) = to_render_image(sample) {
                 *latest.lock().unwrap() = Some(image);
+                edge_light.store(light.to_bits(), Ordering::Relaxed);
                 if !pending_cb.swap(true, Ordering::AcqRel) {
                     let _ = tx.unbounded_send(());
                 }
@@ -265,6 +271,11 @@ impl VideoPlayer {
 
     pub fn is_playing(&self) -> bool {
         self.want_play
+    }
+
+    /// Share (0..1) of the strip under the action buttons that is near white.
+    pub fn edge_light(&self) -> f32 {
+        f32::from_bits(self.edge_light.load(Ordering::Relaxed))
     }
 
     pub fn has_frame(&self) -> bool {
@@ -445,7 +456,8 @@ impl VideoPlayer {
     }
 }
 
-fn to_render_image(sample: &gst::Sample) -> Option<Arc<RenderImage>> {
+/// The frame as gpui wants it, and how light the strip under the buttons is.
+fn to_render_image(sample: &gst::Sample) -> Option<(Arc<RenderImage>, f32)> {
     let caps = sample.caps()?;
     let info = gst_video::VideoInfo::from_caps(caps).ok()?;
     let buffer = sample.buffer()?;
@@ -457,7 +469,31 @@ fn to_render_image(sample: &gst::Sample) -> Option<Arc<RenderImage>> {
     for row in 0..h {
         bgra.extend_from_slice(&data[row * stride..row * stride + w * 4]);
     }
+    let light = edge_light(&bgra, w, h);
     // gpui keeps image data as BGRA; the buffer type just says "4 bytes per pixel".
     let buf = image::RgbaImage::from_raw(w as u32, h as u32, bgra)?;
-    Some(Arc::new(RenderImage::new(smallvec![image::Frame::new(buf)])))
+    Some((Arc::new(RenderImage::new(smallvec![image::Frame::new(buf)])), light))
+}
+
+/// Share of near-white samples in the right fifth of a BGRA frame, over the lower two
+/// thirds, where the action buttons sit when they cover the video. A sparse grid: a few
+/// hundred samples a frame.
+fn edge_light(bgra: &[u8], w: usize, h: usize) -> f32 {
+    if w == 0 || h == 0 {
+        return 0.;
+    }
+    let (x0, y0) = (w - w / 5, h / 3);
+    let step = (w / 80).max(1);
+    let (mut light, mut seen) = (0u32, 0u32);
+    for y in (y0..h).step_by(step) {
+        for x in (x0..w).step_by(step) {
+            let i = (y * w + x) * 4;
+            let (b, g, r) = (bgra[i] as u32, bgra[i + 1] as u32, bgra[i + 2] as u32);
+            // Rec. 601 luma, 0..255
+            let luma = (299 * r + 587 * g + 114 * b) / 1000;
+            light += u32::from(luma > 200);
+            seen += 1;
+        }
+    }
+    light as f32 / seen.max(1) as f32
 }
