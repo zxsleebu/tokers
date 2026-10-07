@@ -50,6 +50,8 @@ const FACE_GLASS: gpui::Glass =
 const LENS_GLASS: gpui::Glass =
     gpui::Glass { refraction: px(22.), bevel: px(14.), dispersion: 0.3, highlight: 3. };
 const FACE: f32 = 48.;
+/// A button's height in the stack (padding, face, gap, count) before it has been painted once.
+const COMMENTS_ROW: f32 = 8. + FACE + 4. + 15. + 8.;
 /// The drop behind the hovered button is this much wider than a face.
 const LENS_GROW: f32 = 10.;
 /// The drop's slide between buttons: a little underdamped, so it overshoots as it lands.
@@ -210,6 +212,9 @@ pub struct FeedView {
     /// The buttons are on the video, or on their way to or from it: the caption keeps
     /// clear of them (it rewraps once, not on every frame of the move).
     clear_buttons: bool,
+    /// How far into wide mode (0..1, the spring): the panel shows the comments, so their
+    /// button folds away.
+    wide_t: f32,
 }
 
 impl EventEmitter<FeedEvent> for FeedView {}
@@ -279,6 +284,7 @@ impl FeedView {
             wide_anim: Spring::new(Springs::PANEL, 0.),
             beside_anim: Spring::new(Springs::PANEL, 1.),
             clear_buttons: false,
+            wide_t: 0.,
         }
     }
 
@@ -1077,10 +1083,31 @@ impl FeedView {
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_like(cx))),
             )
-            .child(
-                button("comments", "icons/message-circle.svg", compact(s.comment_count), fg, None, cx)
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_comments(window, cx))),
-            )
+            .when(self.wide_t < 0.999, |el| {
+                // the panel shows the comments in wide mode: the button folds away
+                let fold = 1. - self.wide_t;
+                // its height as last painted (face top to count bottom, plus its padding)
+                let row = match (
+                    self.lens.faces.borrow().get("comments"),
+                    self.lens.labels.borrow().get("comments"),
+                ) {
+                    (Some(face), Some(label)) => f32::from(label.bottom() - face.top()) + 16.,
+                    _ => COMMENTS_ROW,
+                };
+                el.child(
+                    div().when(fold < 0.999, |d| d.h(px(row * fold)).overflow_hidden()).opacity(fold).child(
+                        button(
+                            "comments",
+                            "icons/message-circle.svg",
+                            compact(s.comment_count),
+                            fg,
+                            None,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_comments(window, cx))),
+                    ),
+                )
+            })
             .child(
                 button(
                     "save",
@@ -1125,6 +1152,13 @@ impl Render for FeedView {
         self.wide_anim.set(wide_to);
         self.beside_anim.set(beside_to);
         let wt = self.wide_anim.tick(window, cx).clamp(0., 1.);
+        self.wide_t = wt;
+        if wt > 0.999 {
+            // folded away: nothing to hover, nowhere for the drop to go
+            if self.lens.hovered == Some("comments") {
+                self.lens.hovered = None;
+            }
+        }
         let bt = self.beside_anim.tick(window, cx).clamp(0., 1.);
         let sidebar = self.sidebar;
         let arrange = |sheet, mode| Layout::arrange(w, h, sidebar, sheet, mode);
