@@ -181,6 +181,12 @@ impl Transport {
         pace: impl Into<Pace>,
     ) -> Result<serde_json::Value> {
         let resp = self.get(url, headers, proxy, pace).await?;
+        if resp.body.is_empty() {
+            // the edge's silent "no": a bad signature, a rejected identity or a random drop.
+            // The path only: the query carries the signatures and the device ids.
+            let path = url.split('?').next().unwrap_or(url);
+            log::warn!("empty response (HTTP {}) from {path}", resp.status);
+        }
         parse_json(resp)
     }
 }
