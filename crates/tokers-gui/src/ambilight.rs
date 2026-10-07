@@ -68,6 +68,8 @@ pub struct Ambilight {
     shown: Vec<[f32; 4]>,
     /// The last frame's glimpse, kept while the glow fades out after it.
     last: Option<Arc<Glimpse>>,
+    /// How far right the glow reaches, in cells (≤ `edge`): short of something beside it.
+    right: f32,
 }
 
 impl Ambilight {
@@ -85,17 +87,25 @@ impl Ambilight {
             image: None,
             shown: Vec::new(),
             last: None,
+            right: 0.,
         }
+    }
+
+    /// The picture's aspect (width / height) of the frame the glow comes from.
+    pub fn aspect(&self) -> Option<f32> {
+        self.last.as_ref().map(|g| g.w as f32 / g.h as f32)
     }
 
     /// Steps the glow toward `frame` (none: it fades out) and returns the image to draw
     /// and where. `spread`: reach of the glow beyond the picture, as a share of its height;
-    /// `strength`: 0..1.
+    /// `strength`: 0..1; `right`: the room on the right if something there cuts it short
+    /// (same unit as `spread`): the glow fades out by then on its own curve.
     pub fn update(
         &mut self,
         frame: Option<Arc<Glimpse>>,
         spread: f32,
         strength: f32,
+        right: Option<f32>,
         window: &mut Window,
     ) -> Option<(Arc<RenderImage>, Reach)> {
         let now = Instant::now();
@@ -114,8 +124,12 @@ impl Ambilight {
             self.glow = vec![[0.; 4]; self.w * self.h];
             self.crop = bars(&source);
         }
+        let right = right.map_or(edge as f32, |r| (r * DOWN as f32).clamp(0.5, edge as f32));
+        // the room changes as a panel slides in: redrawn even on a paused frame
+        let moved = (right - self.right).abs() > 0.05;
+        self.right = right;
         let fading = frame.is_none();
-        if !fresh && !fading {
+        if !fresh && !fading && !moved {
             return self.image.clone().map(|image| (image, self.reach(&source)));
         }
         self.stepped = now;
@@ -193,8 +207,10 @@ impl Ambilight {
         // centred on the picture, its edges at ±0.5
         let qx = (ox as f32 + 0.5 - edge) / vw - 0.5;
         let qy = (oy as f32 + 0.5 - edge) / vh - 0.5;
-        // beyond the edge, in cells; the larger of the two, so the sides meet on the diagonals
-        let out = ((qx.abs() - 0.5) * vw).max((qy.abs() - 0.5) * vh).max(0.) / edge;
+        // beyond the edge, as a share of the reach that way; the larger of the two, so the
+        // sides meet on the diagonals
+        let across = if qx > 0. { self.right } else { edge };
+        let out = ((qx.abs() - 0.5) * vw / across).max((qy.abs() - 0.5) * vh / edge).max(0.);
         let fade = ((out - FADE_START) / (1. - FADE_START)).clamp(0., 1.);
         let alpha = PEAK * (1. - fade).powf(FADE_CURVE);
         if alpha <= 0. {

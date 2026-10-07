@@ -33,15 +33,9 @@ const WHEEL_COOLDOWN: Duration = Duration::from_millis(260);
 /// Touchpad: how far (share of the video height) a swipe goes before it turns the page.
 const SWIPE_COMMIT: f32 = 0.18;
 const GESTURE_GAP: Duration = Duration::from_millis(160);
-/// The comments panel has no background of its own: the glow fades into the dark there.
-/// The fade starts this far left of the panel's edge...
-const VEIL_LEAD: f32 = 56.;
-/// ...runs over this share of the panel (past the lead)...
-const VEIL_REACH: f32 = 0.6;
-/// ...and ends this dark (share of the window background), with a trace of the glow left.
-const VEIL_DIM: f32 = 0.85;
-/// The fade is eased (gradients are linear, two stops): drawn in this many linear pieces.
-const VEIL_STEPS: usize = 12;
+/// The comments panel has no background of its own: the glow beside the video dies out
+/// this far into it (px), on its own curve, rather than lying under the text.
+const GLOW_INTO_PANEL: f32 = 24.;
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
 /// Light under a glyph or count (see `Glimpse::light_in`) where its shadow starts...
@@ -1352,12 +1346,6 @@ impl Render for FeedView {
         // the video's own colours thrown around it, behind it
         let prefs = Store::prefs(cx).clone();
         let frame = self.current_player().and_then(|p| p.read(cx).glimpse());
-        let thrown = self.ambilight.update(
-            frame.clone().filter(|_| prefs.ambilight),
-            prefs.ambilight_reach(),
-            prefs.ambilight_strength,
-            window,
-        );
         // the picture as the column shows it (fitted, bars and all), the glow around that
         let fitted = |aspect: f32| {
             let (w, h) = if aspect > column.w / column.h {
@@ -1367,6 +1355,19 @@ impl Render for FeedView {
             };
             Rect::new(column.x + (column.w - w) / 2., column.y + (column.h - h) / 2., w, h)
         };
+        // beside the comments panel the glow fades out where the comments begin
+        let room = closed.comments_panel.and_then(|panel| {
+            let aspect = frame.as_ref().map(|f| f.w as f32 / f.h as f32).or(self.ambilight.aspect())?;
+            let pic = fitted(aspect);
+            Some((panel.x - origin.0 + GLOW_INTO_PANEL - (pic.x + pic.w)) / pic.h)
+        });
+        let thrown = self.ambilight.update(
+            frame.clone().filter(|_| prefs.ambilight),
+            prefs.ambilight_reach(),
+            prefs.ambilight_strength,
+            room,
+            window,
+        );
         let glow_at = thrown.as_ref().map(|(_, reach)| {
             let pic = fitted(reach.aspect);
             Rect::new(
@@ -1391,31 +1392,6 @@ impl Render for FeedView {
             )
         });
         let mut root = div().size_full().relative().children(glow).child(stage);
-        if let Some(panel) = closed.comments_panel {
-            // a linear ramp shows a hard edge at both ends; smootherstep sets off and lands softly
-            let dark = |t: f32| {
-                let t = t.clamp(0., 1.);
-                let eased = t * t * t * (t * (t * 6. - 15.) + 10.);
-                theme.background.opacity(eased * VEIL_DIM * wt)
-            };
-            // whole pixels, so the pieces meet without a seam
-            let from = (panel.x - origin.0 - VEIL_LEAD).round();
-            let step = ((VEIL_LEAD + panel.w * VEIL_REACH) / VEIL_STEPS as f32).round().max(1.);
-            let pieces = (0..VEIL_STEPS).map(|i| {
-                let (t0, t1) = (i as f32 / VEIL_STEPS as f32, (i + 1) as f32 / VEIL_STEPS as f32);
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(from + i as f32 * step))
-                    .w(px(step))
-                    .bg(linear_gradient(90., linear_color_stop(dark(t0), 0.), linear_color_stop(dark(t1), 1.)))
-            });
-            let rest = from + VEIL_STEPS as f32 * step;
-            root = root
-                .children(pieces)
-                .child(div().absolute().top_0().bottom_0().right_0().left(px(rest)).bg(dark(1.)));
-        }
 
         self.lens.tick(window, cx);
         let picture = frame.map(|f| (fitted(f.w as f32 / f.h as f32), f));
