@@ -33,6 +33,7 @@ const ICONS: &[(&str, &[u8])] = embed![
     "icons/heart-filled.svg",
     "icons/house.svg",
     "icons/link.svg",
+    "icons/list-filter.svg",
     "icons/menu.svg",
     "icons/message-circle.svg",
     "icons/message-circle-filled.svg",
@@ -56,6 +57,8 @@ const ICONS: &[(&str, &[u8])] = embed![
     "icons/window-maximize.svg",
     "icons/window-minimize.svg",
     "icons/window-restore.svg",
+    "icons/thumbs-down.svg",
+    "icons/thumbs-down-filled.svg",
     "icons/x.svg",
 ];
 

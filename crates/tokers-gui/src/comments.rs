@@ -1,17 +1,21 @@
 //! Comments of one video: the side panel in wide windows, the bottom sheet otherwise.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, Hsla, ListAlignment, ListScrollEvent, ListState,
-    MouseButton, ObjectFit, Pixels, Render, ScrollWheelEvent, SharedString, Window, div, img, list, px,
+    AnyElement, Bounds, Context, Entity, EventEmitter, FontWeight, Hsla, ListAlignment, ListScrollEvent,
+    ListState, MouseButton, ObjectFit, Pixels, Render, ScrollWheelEvent, SharedString, Window, anchored,
+    canvas, deferred, div, img, list, point, px,
 };
 use tokers::TikTok;
 use tokers::models::{Aweme, Comment, UrlList};
 
 use crate::media::Images;
+use crate::motion::Rising as _;
 use crate::scrollbar::Scrollbar;
 use crate::theme::{ActiveTheme as _, Text};
 use crate::ui::{Button, compact, icon, skeleton, spinner};
@@ -29,6 +33,50 @@ pub enum Variant {
 pub enum CommentsEvent {
     Close,
 }
+
+/// How the loaded comments are shown. The API of the captured app version has no
+/// sorting or filters (later versions do), so this works on what has been fetched;
+/// a filter keeps fetching a few pages while it has little to show.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Order {
+    Top,
+    Newest,
+    Media,
+    Creator,
+}
+
+impl Order {
+    const ALL: [Order; 4] = [Order::Top, Order::Newest, Order::Media, Order::Creator];
+
+    fn label(self) -> &'static str {
+        match self {
+            Order::Top => "Популярные",
+            Order::Newest => "Сначала новые",
+            Order::Media => "С медиа",
+            Order::Creator => "От автора",
+        }
+    }
+
+    fn filters(self) -> bool {
+        matches!(self, Order::Media | Order::Creator)
+    }
+}
+
+/// A filter fetches on its own until it shows this many comments...
+const FILTER_FILL: usize = 12;
+/// ...or has gone through this many pages since it was picked.
+const FILTER_PAGES: u32 = 8;
+
+/// The reader's mark on a comment (kept for this session, not sent anywhere).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Vote {
+    Up,
+    Down,
+}
+
+/// Comment rows, measured off the phone app: avatar 12 from the left, likes 14 from the right.
+const ROW_LEFT: f32 = 12.;
+const ROW_RIGHT: f32 = 14.;
 
 #[derive(Default)]
 struct Thread {
@@ -55,6 +103,15 @@ pub struct CommentsView {
     scrollbar: Entity<Scrollbar>,
     desc_open: bool,
     variant: Variant,
+    votes: HashMap<String, Vote>,
+    order: Order,
+    /// The rows: indices into `items` in the order and under the filter chosen.
+    shown: Vec<usize>,
+    /// Pages a filter has fetched by itself since it was picked.
+    filter_pages: u32,
+    sort_open: bool,
+    /// Where the sort button was painted (the menu hangs under it).
+    sort_anchor: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl EventEmitter<CommentsEvent> for CommentsView {}
@@ -67,6 +124,11 @@ impl CommentsView {
         let scrollbar = Scrollbar::list(&list, cx.entity_id(), cx);
         list.set_scroll_handler(cx.listener(|this: &mut Self, e: &ListScrollEvent, _, cx| {
             this.scrollbar.update(cx, |bar, cx| bar.wake(cx));
+            if this.sort_open {
+                // the menu would be left hanging where the button was
+                this.sort_open = false;
+                cx.notify();
+            }
             if e.visible_range.end + PREFETCH_ROWS >= this.row_count() {
                 this.load_more(cx);
             }
@@ -86,6 +148,12 @@ impl CommentsView {
             scrollbar,
             desc_open: false,
             variant: Variant::Panel,
+            votes: HashMap::new(),
+            order: Order::Top,
+            shown: Vec::new(),
+            filter_pages: 0,
+            sort_open: false,
+            sort_anchor: Rc::default(),
         };
         this.load_more(cx);
         this
@@ -109,11 +177,54 @@ impl CommentsView {
     }
 
     fn row_count(&self) -> usize {
-        self.lead() + self.items.len() + 1
+        self.lead() + self.shown.len() + 1
     }
 
     fn footer_ix(&self) -> usize {
-        self.lead() + self.items.len()
+        self.lead() + self.shown.len()
+    }
+
+    fn matches(&self, comment: &Comment) -> bool {
+        let author = &self.aweme.author.uid;
+        match self.order {
+            Order::Top | Order::Newest => true,
+            Order::Media => !comment.media().is_empty(),
+            Order::Creator => {
+                &comment.user.uid == author || comment.reply_comment.iter().any(|r| &r.user.uid == author)
+            }
+        }
+    }
+
+    /// Rebuilds the rows for the current order, keeping the reader where they were.
+    fn arrange(&mut self) {
+        let mut shown: Vec<usize> = (0..self.items.len()).filter(|&i| self.matches(&self.items[i])).collect();
+        if self.order == Order::Newest {
+            shown.sort_by_key(|&i| std::cmp::Reverse(self.items[i].create_time));
+        }
+        self.shown = shown;
+        let top = self.list.logical_scroll_top();
+        self.list.reset(self.row_count());
+        self.list.scroll_to(top);
+    }
+
+    fn set_order(&mut self, order: Order, cx: &mut Context<Self>) {
+        self.sort_open = false;
+        if self.order != order {
+            self.order = order;
+            self.filter_pages = 0;
+            self.arrange();
+            self.list.scroll_to(gpui::ListOffset::default());
+            self.fill_filter(cx);
+        }
+        cx.notify();
+    }
+
+    /// A filter with little to show fetches the next page by itself.
+    fn fill_filter(&mut self, cx: &mut Context<Self>) {
+        if self.order.filters() && self.shown.len() < FILTER_FILL && self.filter_pages < FILTER_PAGES {
+            self.filter_pages += 1;
+            self.load_more(cx);
+        }
     }
 
     fn remeasure(&self, ix: usize) {
@@ -121,7 +232,7 @@ impl CommentsView {
     }
 
     fn comment_ix(&self, cid: &str) -> Option<usize> {
-        self.items.iter().position(|c| c.cid == cid).map(|i| i + self.lead())
+        self.shown.iter().position(|&i| self.items[i].cid == cid).map(|i| i + self.lead())
     }
 
     fn load_more(&mut self, cx: &mut Context<Self>) {
@@ -147,12 +258,18 @@ impl CommentsView {
                             this.items.iter().map(|c| c.cid.clone()).collect();
                         let before = this.items.len();
                         this.items.extend(page.comments.into_iter().filter(|c| !known.contains(&c.cid)));
-                        // the new rows go where the footer was; the footer follows them
-                        this.list.splice(footer..footer + 1, this.items.len() - before + 1);
                         this.cursor = page.cursor;
                         this.has_more = page.has_more;
                         if page.total > 0 {
                             this.total = page.total;
+                        }
+                        if this.order == Order::Top {
+                            // the new rows go where the footer was; the footer follows them
+                            this.shown.extend(before..this.items.len());
+                            this.list.splice(footer..footer + 1, this.items.len() - before + 1);
+                        } else {
+                            this.arrange();
+                            this.fill_filter(cx);
                         }
                     }
                     Err(e) => {
@@ -185,6 +302,16 @@ impl CommentsView {
         if self.thread(cid).items.is_empty() {
             self.load_replies(cid.to_string(), cx);
         }
+    }
+
+    /// A second click on the same mark takes it back; the other mark replaces it.
+    fn vote(&mut self, cid: &str, vote: Vote, cx: &mut Context<Self>) {
+        if self.votes.get(cid) == Some(&vote) {
+            self.votes.remove(cid);
+        } else {
+            self.votes.insert(cid.to_string(), vote);
+        }
+        cx.notify();
     }
 
     fn thread(&mut self, cid: &str) -> &mut Thread {
@@ -230,12 +357,16 @@ impl CommentsView {
         .detach();
     }
 
+    /// "Комментарии N" and the sort button, centred; the close button on the right of the sheet.
     fn title(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
+        let anchor = self.sort_anchor.clone();
+        let sorted = self.order != Order::Top;
         div()
+            .relative()
             .flex()
             .items_center()
-            .justify_between()
+            .justify_center()
             .px_5()
             .h(px(44.))
             .border_b_1()
@@ -244,20 +375,99 @@ impl CommentsView {
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Комментарии")
-                    .child(div().text_color(theme.muted_foreground).child(compact(self.total))),
+                    .child(div().ml_1().text_color(theme.muted_foreground).child(compact(self.total)))
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                Button::new("sort-comments")
+                                    .icon("icons/list-filter.svg")
+                                    .small()
+                                    .when(sorted, |b| b.secondary())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.sort_open = !this.sort_open;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                canvas(move |bounds, _, _| anchor.set(bounds), |_, _, _, _| {})
+                                    .absolute()
+                                    .inset_0(),
+                            ),
+                    ),
             )
             .when(self.variant == Variant::Sheet, |el| {
                 el.child(
-                    Button::new("close-comments")
-                        .icon("icons/x.svg")
-                        .small()
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(CommentsEvent::Close))),
+                    div().absolute().right(px(ROW_RIGHT)).top_0().bottom_0().flex().items_center().child(
+                        Button::new("close-comments")
+                            .icon("icons/x.svg")
+                            .small()
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(CommentsEvent::Close))),
+                    ),
                 )
             })
             .into_any_element()
+    }
+
+    /// The order menu, hung under the sort button.
+    fn sort_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let at = self.sort_anchor.get();
+        let current = self.order;
+        let menu = div()
+            .id("sort-menu")
+            .occlude()
+            .min_w(px(200.))
+            .p_1()
+            .flex()
+            .flex_col()
+            .rounded(theme.radius)
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_lg()
+            .text_size(theme.text(Text::Label))
+            .on_mouse_down_out(cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+                // the sort button toggles the menu itself
+                if !this.sort_anchor.get().contains(&e.position) {
+                    this.sort_open = false;
+                    cx.notify();
+                }
+            }))
+            .children(Order::ALL.into_iter().map(|order| {
+                let on = order == current;
+                div()
+                    .id(SharedString::from(format!("sort-{}", order.label())))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.secondary))
+                    .text_color(if on { theme.foreground } else { theme.muted_foreground })
+                    .child(order.label())
+                    .when(on, |el| el.child(icon("icons/check.svg").size(px(16.)).text_color(theme.primary)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_order(order, cx)))
+            }))
+            .rising("sort-menu-in");
+        deferred(
+            anchored()
+                .position(point(
+                    at.origin.x + at.size.width / 2. - px(100.),
+                    at.origin.y + at.size.height + px(6.),
+                ))
+                .snap_to_window_with_margin(px(8.))
+                .child(menu),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 
     fn render_row(&mut self, ix: usize, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -268,10 +478,22 @@ impl CommentsView {
         // room under the title for the first row
         let first = ix == self.lead();
         if ix >= self.footer_ix() {
-            return div().px_5().pb_4().when(first, |el| el.pt_4()).child(self.footer(cx)).into_any_element();
+            return div()
+                .pl(px(ROW_LEFT))
+                .pr(px(ROW_RIGHT))
+                .pb_4()
+                .when(first, |el| el.pt_4())
+                .child(self.footer(cx))
+                .into_any_element();
         }
-        let comment = self.items[ix - self.lead()].clone();
-        div().px_5().pb_5().when(first, |el| el.pt_4()).child(self.row(&comment, 0, cx)).into_any_element()
+        let comment = self.items[self.shown[ix - self.lead()]].clone();
+        div()
+            .pl(px(ROW_LEFT))
+            .pr(px(ROW_RIGHT))
+            .pb_5()
+            .when(first, |el| el.pt_4())
+            .child(self.row(&comment, 0, cx))
+            .into_any_element()
     }
 
     fn header(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -369,7 +591,7 @@ impl CommentsView {
 
     fn row(&self, comment: &Comment, depth: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
-        let size = if depth == 0 { px(32.) } else { px(24.) };
+        let size = if depth == 0 { px(36.) } else { px(24.) };
         let avatar = Images::get(&comment.user.avatar_thumb, 64, cx);
         let media: Vec<_> = comment
             .media()
@@ -407,12 +629,7 @@ impl CommentsView {
                         el.child(img(image).size_full().object_fit(ObjectFit::Cover))
                     })
             }))
-            .child(
-                div()
-                    .text_size(theme.text(Text::Tiny))
-                    .text_color(theme.muted_foreground.opacity(0.75))
-                    .child(ago(comment.create_time)),
-            );
+            .child(self.meta(comment, cx));
 
         if depth == 0 && replies > 0 {
             let label = if open {
@@ -482,21 +699,71 @@ impl CommentsView {
 
         div()
             .flex()
-            .gap_3()
+            .gap_2()
             .child(avatar_el(avatar, size, &comment.user.nickname, theme.secondary, theme.muted_foreground))
             .child(body)
+            .into_any_element()
+    }
+
+    /// Age on the left; like (with its count) and dislike on the right, as in the app.
+    fn meta(&self, comment: &Comment, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let vote = self.votes.get(&comment.cid).copied();
+        let liked = vote == Some(Vote::Up);
+        let likes = comment.digg_count + u64::from(liked);
+        let mark = |key: &str, path: &'static str, on: bool, vote: Vote, cx: &mut Context<Self>| {
+            let cid = comment.cid.clone();
+            let color = if on { theme.primary } else { theme.muted_foreground };
+            div()
+                .id(SharedString::from(format!("{key}-{}", comment.cid)))
+                .flex()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .text_color(color)
+                .hover(|s| s.text_color(if on { theme.primary } else { theme.foreground }))
+                .child(icon(path).size(px(20.)).text_color(color))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.vote(&cid, vote, cx);
+                }))
+        };
+        div()
+            .flex()
+            .items_center()
+            .mt_1()
+            .text_size(theme.text(Text::Small))
+            .text_color(theme.muted_foreground)
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_0p5()
-                    .pt_4()
-                    .text_size(theme.text(Text::Tiny))
-                    .text_color(theme.muted_foreground)
-                    .child(icon("icons/heart.svg").size(px(14.)).text_color(theme.muted_foreground))
-                    .when(comment.digg_count > 0, |el| el.child(compact(comment.digg_count))),
+                    .flex_1()
+                    .text_color(theme.muted_foreground.opacity(0.75))
+                    .child(ago(comment.create_time)),
             )
+            .child(
+                // a fixed slot, so the dislikes line up whatever the count
+                div().w(px(64.)).flex().child(
+                    mark(
+                        "like",
+                        if liked { "icons/heart-filled.svg" } else { "icons/heart.svg" },
+                        liked,
+                        Vote::Up,
+                        cx,
+                    )
+                    .when(likes > 0, |el| el.child(compact(likes))),
+                ),
+            )
+            .child(mark(
+                "dislike",
+                if vote == Some(Vote::Down) {
+                    "icons/thumbs-down-filled.svg"
+                } else {
+                    "icons/thumbs-down.svg"
+                },
+                vote == Some(Vote::Down),
+                Vote::Down,
+                cx,
+            ))
             .into_any_element()
     }
 }
@@ -512,8 +779,8 @@ impl CommentsView {
                 .children((0..6usize).map(|i| {
                     div()
                         .flex()
-                        .gap_3()
-                        .child(skeleton(("sk-a", i), |d| d.size(px(32.)).rounded_full(), cx))
+                        .gap_2()
+                        .child(skeleton(("sk-a", i), |d| d.size(px(36.)).rounded_full(), cx))
                         .child(
                             div()
                                 .flex()
@@ -561,6 +828,14 @@ impl CommentsView {
                 .text_color(theme.muted_foreground)
                 .child("Комментариев пока нет")
                 .into_any_element()
+        } else if self.shown.is_empty() && !self.has_more {
+            div()
+                .py_6()
+                .flex()
+                .justify_center()
+                .text_color(theme.muted_foreground)
+                .child("Таких комментариев нет")
+                .into_any_element()
         } else if self.has_more {
             // a short page leaves nothing to scroll: offer the next one
             div()
@@ -571,8 +846,15 @@ impl CommentsView {
                     Button::new("more-comments")
                         .secondary()
                         .small()
-                        .label("Ещё комментарии")
-                        .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))),
+                        .label(if self.order.filters() {
+                            "Искать дальше"
+                        } else {
+                            "Ещё комментарии"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.filter_pages = 0;
+                            this.load_more(cx);
+                        })),
                 )
                 .into_any_element()
         } else {
@@ -602,6 +884,7 @@ impl Render for CommentsView {
                 this.scrollbar.update(cx, |bar, cx| bar.set_hovered(hovered, cx));
             }))
             .when(self.variant == Variant::Sheet, |el| el.child(self.title(cx)))
+            .when(self.sort_open, |el| el.child(self.sort_menu(cx)))
             .child(
                 // the author block is a row of the list: a long description scrolls away with it
                 div()
