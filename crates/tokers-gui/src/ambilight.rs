@@ -64,6 +64,8 @@ pub struct Ambilight {
     seen: u64,
     stepped: Instant,
     image: Option<Arc<RenderImage>>,
+    /// The field as last drawn (blurred, premultiplied), to tell how light it is anywhere.
+    shown: Vec<[f32; 4]>,
     /// The last frame's glimpse, kept while the glow fades out after it.
     last: Option<Arc<Glimpse>>,
 }
@@ -81,6 +83,7 @@ impl Ambilight {
             seen: 0,
             stepped: Instant::now(),
             image: None,
+            shown: Vec::new(),
             last: None,
         }
     }
@@ -140,6 +143,7 @@ impl Ambilight {
         }
         if fading && !alive {
             self.last = None;
+            self.shown.clear();
             self.drop_image(window);
             return None;
         }
@@ -148,9 +152,23 @@ impl Ambilight {
         }
         let blurred = blur(&self.glow, self.w, self.h);
         let image = to_image(&blurred, self.w, self.h);
+        self.shown = blurred;
         self.drop_image(window);
         self.image = Some(image.clone());
         Some((image, self.reach(&source)))
+    }
+
+    /// How light the glow makes the dark backdrop under a region given in shares of the
+    /// glow image (0..1 each way), as [`crate::player::light_in`] measures it.
+    pub fn light_in(&self, u0: f32, v0: f32, u1: f32, v1: f32) -> f32 {
+        if self.shown.len() != self.w * self.h || self.shown.is_empty() {
+            return 0.;
+        }
+        crate::player::light_in(self.w, self.h, u0, v0, u1, v1, |x, y| {
+            // premultiplied: the colour it adds over black
+            let [r, g, b, _] = self.shown[y * self.w + x];
+            0.299 * r + 0.587 * g + 0.114 * b
+        })
     }
 
     fn drop_image(&mut self, window: &mut Window) {

@@ -22,7 +22,7 @@ use crate::comments::{CommentsEvent, CommentsView, Variant, avatar_el, is_long, 
 use crate::layout::{Layout, Mode, Rect, TITLEBAR};
 use crate::media::Images;
 use crate::motion::{Motion, Motioned as _, Rising as _, Spring, Springs, Veiling as _, mix};
-use crate::player::VideoPlayer;
+use crate::player::{Glimpse, VideoPlayer};
 use crate::state::{CommentsMode, Store, downloads_dir};
 use crate::theme::{ActiveTheme as _, Text};
 use crate::ui::{Button, compact, icon, spinner};
@@ -35,6 +35,10 @@ const SWIPE_COMMIT: f32 = 0.18;
 const GESTURE_GAP: Duration = Duration::from_millis(160);
 /// How long a video stays current before its comments are fetched.
 const COMMENTS_DELAY: Duration = Duration::from_millis(350);
+/// Light under a glyph or count (see `Glimpse::light_in`) where its shadow starts...
+const SHADE_FROM: f32 = 0.32;
+/// ...and where it is at full strength.
+const SHADE_FULL: f32 = 0.6;
 /// How hard the button faces blur what is behind them: little, liquid glass is mostly clear.
 const FACE_BLUR: gpui::Pixels = px(5.);
 /// Frosted faces (liquid glass turned off) blur harder instead.
@@ -74,6 +78,8 @@ struct Lens {
     /// Where each face of the current stack was painted, and the stack itself.
     faces: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
     origin: Rc<Cell<Point<Pixels>>>,
+    /// Where each count under a face was painted.
+    labels: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
     x: f32,
     /// This frame's drop.
     now: Drop,
@@ -99,6 +105,7 @@ impl Lens {
             tall: Spring::new(LENS_JELLY, 1.),
             faces: Rc::default(),
             origin: Rc::default(),
+            labels: Rc::default(),
             x: 0.,
             now: Drop { x: 0., y: 0., size: 0., wide: 1., tall: 1. },
         }
@@ -180,8 +187,9 @@ pub struct FeedView {
     pops: HashMap<&'static str, (String, usize)>,
     lens: Lens,
     ambilight: Ambilight,
-    /// How much the glyphs need a shadow: the picture under the buttons is light (0..1, eased).
-    glyph_shadow: Spring,
+    /// How much each face's glyph (`false`) and count (`true`) needs a shadow, by how light it
+    /// is right under it (0..1, eased per element).
+    shades: HashMap<(&'static str, bool), Spring>,
     /// Presses per button (and the video they were on), keying each squish animation.
     presses: HashMap<&'static str, (String, usize)>,
     pub sidebar: bool,
@@ -259,7 +267,7 @@ impl FeedView {
             pops: HashMap::new(),
             lens: Lens::new(),
             ambilight: Ambilight::new(),
-            glyph_shadow: Spring::new(Springs::PANEL, 0.),
+            shades: HashMap::new(),
             presses: HashMap::new(),
             sidebar: true,
             viewport: size(px(720.), px(1280.)),
@@ -732,6 +740,52 @@ impl FeedView {
             .into_any_element()
     }
 
+    /// Eases each glyph's and count's shadow toward how light it is right under it: the
+    /// picture's cells there while the buttons cover the video (`over`), the ambient light's
+    /// field beside it. Bounds come from the last paint; a few cells per element.
+    fn shade_buttons(
+        &mut self,
+        picture: Option<(Rect, std::sync::Arc<Glimpse>)>,
+        glow: Option<Rect>,
+        origin: (f32, f32),
+        over: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // shares of `area` (feed coordinates) covered by window-space bounds
+        let share = |b: Bounds<Pixels>, area: Rect| {
+            let x = (f32::from(b.origin.x) - origin.0 - area.x) / area.w;
+            let y = (f32::from(b.origin.y) - origin.1 - area.y) / area.h;
+            (x, y, x + f32::from(b.size.width) / area.w, y + f32::from(b.size.height) / area.h)
+        };
+        let light = |b: Bounds<Pixels>| {
+            let on_video = picture.as_ref().map_or(0., |(at, frame)| {
+                let (u0, v0, u1, v1) = share(b, *at);
+                frame.light_in(u0, v0, u1, v1)
+            });
+            let on_glow = glow.map_or(0., |at| {
+                let (u0, v0, u1, v1) = share(b, at);
+                self.ambilight.light_in(u0, v0, u1, v1)
+            });
+            over * on_video + (1. - over) * on_glow
+        };
+        let mut targets: Vec<((&'static str, bool), f32)> = Vec::new();
+        for (label, bounds) in [(false, &self.lens.faces), (true, &self.lens.labels)] {
+            for (&key, &b) in bounds.borrow().iter() {
+                // a shadow from fairly light up, in full by a pale backdrop
+                targets.push((
+                    (key, label),
+                    ((light(b) - SHADE_FROM) / (SHADE_FULL - SHADE_FROM)).clamp(0., 1.),
+                ));
+            }
+        }
+        for (key, target) in targets {
+            let spring = self.shades.entry(key).or_insert_with(|| Spring::new(Springs::PANEL, target));
+            spring.set(target);
+            spring.tick(window, cx);
+        }
+    }
+
     /// The button stack; `beside` 1 = beside the video (themed faces), 0 = on it (white on dark glass).
     fn actions(&self, aweme: &Aweme, beside: f32, current: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
@@ -751,15 +805,17 @@ impl FeedView {
         let over = 1. - beside;
         let prefs = Store::prefs(cx).clone();
         let (liquid, clarity) = (prefs.liquid_glass, prefs.button_clarity.clamp(0., 1.));
-        // How light it is under the buttons: the picture's edge when they cover it, the ambient
-        // light it throws when they sit beside it. Glyphs, counts and faces all answer to it.
-        let thrown = if prefs.ambilight { prefs.ambilight_strength.clamp(0., 1.) } else { 0. };
-        let shade = self.glyph_shadow.value() * (over + beside * thrown);
-        let face_bg = mix(
-            gpui::black().opacity(0.32 * (1. - clarity) + 0.22 * shade),
-            theme.secondary.opacity(1. - 0.55 * clarity + 0.3 * shade),
-            beside,
-        );
+        // How light it is right under each glyph and each count (see `FeedView::shade_buttons`):
+        // glyphs, counts and faces all answer to it, each on its own.
+        let shade_of =
+            |key: &'static str, label: bool| self.shades.get(&(key, label)).map_or(0., |s| s.value());
+        let face_bg = |shade: f32| {
+            mix(
+                gpui::black().opacity(0.32 * (1. - clarity) + 0.22 * shade),
+                theme.secondary.opacity(1. - 0.55 * clarity + 0.3 * shade),
+                beside,
+            )
+        };
         let face_hover = mix(gpui::white().opacity(0.14), theme.secondary_active, beside);
         // the counts are white wherever the buttons sit, like their glyphs
         let label = mix(gpui::white(), theme.foreground, beside);
@@ -767,18 +823,21 @@ impl FeedView {
         let rim = theme.border.opacity(theme.border.a * beside);
         // the counts: a light shadow always (the picture or the light it throws is under
         // them), a deeper one when it is light
-        let shadows = [
-            gpui::TextShadow {
-                color: gpui::black().opacity((0.5 + 0.1 * over + 0.4 * shade).min(0.9)),
-                offset: gpui::point(px(0.), px(1.)),
-                blur: px(2.),
-            },
-            gpui::TextShadow {
-                color: gpui::black().opacity(0.6 * shade),
-                offset: gpui::point(px(0.), px(1.)),
-                blur: px(6.),
-            },
-        ];
+        let shadows = |shade: f32| {
+            [
+                gpui::TextShadow {
+                    color: gpui::black().opacity((0.5 + 0.1 * over + 0.4 * shade).min(0.9)),
+                    offset: gpui::point(px(0.), px(1.)),
+                    blur: px(2.),
+                },
+                gpui::TextShadow {
+                    color: gpui::black().opacity(0.6 * shade),
+                    offset: gpui::point(px(0.), px(1.)),
+                    blur: px(6.),
+                },
+            ]
+        };
+        let labels = self.lens.labels.clone();
         let pop = |what: &str| self.pops.get(what).filter(|(pid, _)| *pid == id).map(|(_, n)| *n);
         let faces = self.lens.faces.clone();
         let drop = self.lens.now;
@@ -799,6 +858,7 @@ impl FeedView {
                       cx: &mut Context<Self>| {
             let glyph = icon(path).size(px(24.)).text_color(color);
             let lit = if current { glow(key) } else { 0. };
+            let (shade, label_shade) = (shade_of(key, false), shade_of(key, true));
             let glass = div()
                 .absolute()
                 .inset_0()
@@ -807,7 +867,7 @@ impl FeedView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(mix(face_bg, face_hover, lit))
+                .bg(mix(face_bg(shade), face_hover, lit))
                 .backdrop_blur(if liquid { FACE_BLUR } else { FROST_BLUR })
                 .when(liquid, |el| el.backdrop_glass(FACE_GLASS))
                 .border_1()
@@ -893,7 +953,20 @@ impl FeedView {
                         .text_size(theme.text(Text::Tiny))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(label)
-                        .text_shadow(shadows)
+                        .text_shadow(shadows(label_shade))
+                        .when(current, |el| {
+                            let labels = labels.clone();
+                            el.relative().child(
+                                canvas(
+                                    move |bounds, _, _| {
+                                        labels.borrow_mut().insert(key, bounds);
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .inset_0(),
+                            )
+                        })
                         .child(count),
                 )
                 .when(current, |el| {
@@ -1146,39 +1219,49 @@ impl Render for FeedView {
         // the video's own colours thrown around it, behind it
         let prefs = Store::prefs(cx).clone();
         let frame = self.current_player().and_then(|p| p.read(cx).glimpse());
-        let glow = if prefs.ambilight {
-            self.ambilight.update(frame, prefs.ambilight_reach(), prefs.ambilight_strength, window)
-        } else {
-            self.ambilight.update(None, prefs.ambilight_reach(), 0., window)
-        };
-        let glow = glow.map(|(image, reach)| {
-            // the picture as the column shows it (fitted, bars and all), the glow around that
-            let (w, h) = if reach.aspect > column.w / column.h {
-                (column.w, column.w / reach.aspect)
+        let thrown = self.ambilight.update(
+            frame.clone().filter(|_| prefs.ambilight),
+            prefs.ambilight_reach(),
+            prefs.ambilight_strength,
+            window,
+        );
+        // the picture as the column shows it (fitted, bars and all), the glow around that
+        let fitted = |aspect: f32| {
+            let (w, h) = if aspect > column.w / column.h {
+                (column.w, column.w / aspect)
             } else {
-                (column.h * reach.aspect, column.h)
+                (column.h * aspect, column.h)
             };
-            let (x, y) = (column.x + (column.w - w) / 2., column.y + (column.h - h) / 2.);
+            Rect::new(column.x + (column.w - w) / 2., column.y + (column.h - h) / 2., w, h)
+        };
+        let glow_at = thrown.as_ref().map(|(_, reach)| {
+            let pic = fitted(reach.aspect);
+            Rect::new(
+                pic.x + reach.left * pic.w,
+                pic.y + reach.top * pic.h,
+                reach.wide * pic.w,
+                reach.tall * pic.h,
+            )
+        });
+        let glow = thrown.zip(glow_at).map(|((image, _), at)| {
             // kept to the feed: thrown into the titlebar it only muddied it
             div().absolute().inset_0().overflow_hidden().child(
                 img(image)
                     .absolute()
-                    .left(px(x + reach.left * w))
-                    .top(px(y + reach.top * h))
-                    .w(px(reach.wide * w))
-                    .h(px(reach.tall * h))
+                    .left(px(at.x))
+                    .top(px(at.y))
+                    .w(px(at.w))
+                    .h(px(at.h))
                     .object_fit(ObjectFit::Fill)
                     // the grid is coarse; a blur about a cell wide hides its steps
-                    .blur(px(h / 48.)),
+                    .blur(px(at.h / 64.)),
             )
         });
         let mut root = div().size_full().relative().children(glow).child(stage);
 
         self.lens.tick(window, cx);
-        // white glyphs over a light picture get a shadow; eased, so a flickering frame doesn't blink it
-        let light = self.current_player().map_or(0., |p| p.read(cx).edge_light());
-        self.glyph_shadow.set(((light - 0.06) / 0.24).clamp(0., 1.));
-        self.glyph_shadow.tick(window, cx);
+        let picture = frame.map(|f| (fitted(f.w as f32 / f.h as f32), f));
+        self.shade_buttons(picture, glow_at, origin, 1. - closed.beside, window, cx);
         if let Some(actions) = closed.actions.filter(|_| sheet_t < 0.99) {
             let stacks: Vec<AnyElement> = (lo..=hi)
                 .filter(|&i| in_view(i))
