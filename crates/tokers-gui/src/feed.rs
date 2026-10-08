@@ -13,8 +13,8 @@ use gpui::{
     Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, SpringConfig, StyleRefinement,
     Task, TouchPhase, WeakEntity, Window, canvas, div, img, linear_color_stop, linear_gradient, px, size,
 };
-use tokers::TikTok;
 use tokers::endpoints::Feed;
+use tokers::{Identity, TikTok};
 use tokers::models::Aweme;
 
 use crate::ambilight::Ambilight;
@@ -501,9 +501,10 @@ impl FeedView {
         }
         let id = aweme.aweme_id.clone();
         let height = f32::from(self.viewport.height);
-        // the comments being looked at (or about to be) go ahead of feed prefetches
-        let view =
-            cx.new(|cx| CommentsView::new(self.tiktok.urgent(), self.io.clone(), aweme, wait, height, cx));
+        // the comments being looked at (or about to be) go ahead of feed prefetches. Random
+        // ids: from outside the US the edge drops the template device's comment requests
+        let tiktok = self.tiktok.urgent().with_identity(Identity::random());
+        let view = cx.new(|cx| CommentsView::new(tiktok, self.io.clone(), aweme, wait, height, cx));
         cx.subscribe(&view, |this, _, event, cx| match event {
             CommentsEvent::Close => this.close_comments(cx),
             CommentsEvent::Toast(text) => cx.emit(FeedEvent::Toast(text.clone())),
