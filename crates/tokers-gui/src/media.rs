@@ -65,13 +65,13 @@ impl Images {
 
     /// [`Self::get`], the image kept for `owner` (see [`Self::hold_only`]).
     pub fn get_for(owner: &str, list: &UrlList, max: u32, cx: &mut App) -> Option<Arc<RenderImage>> {
-        if let Some(key) = key(list, max) {
-            let entity = Self::entity(cx);
-            if !entity.read(cx).held.get(owner).is_some_and(|keys| keys.contains(&key)) {
-                entity.update(cx, |this, _| this.held.entry(owner.to_string()).or_default().insert(key));
-            }
+        let key = key(list, max)?;
+        let entity = Self::entity(cx);
+        if !entity.read(cx).held.get(owner).is_some_and(|keys| keys.contains(&key)) {
+            let key = key.clone();
+            entity.update(cx, |this, _| this.held.entry(owner.to_string()).or_default().insert(key));
         }
-        Self::get(list, max, cx)
+        Self::keyed(key, list, max, cx).map(|(image, _)| image)
     }
 
     /// Only these owners' images stay past the capacity; the others' go back to taking
@@ -87,8 +87,12 @@ impl Images {
     }
 
     fn slot(list: &UrlList, max: u32, cx: &mut App) -> Option<(Arc<RenderImage>, Palette)> {
-        let urls = candidates(list);
-        let key = key(list, max)?;
+        Self::keyed(key(list, max)?, list, max, cx)
+    }
+
+    /// Asked on every frame for every image on screen: the URLs are only gone through
+    /// when the image is not there yet.
+    fn keyed(key: String, list: &UrlList, max: u32, cx: &mut App) -> Option<(Arc<RenderImage>, Palette)> {
         let entity = Self::entity(cx);
         match entity.read(cx).slots.get(&key) {
             Some(Slot::Ready { image, palette, used }) => {
@@ -98,7 +102,7 @@ impl Images {
             Some(_) => return None,
             None => {}
         }
-        entity.update(cx, |this, cx| this.load(key, urls, max, cx));
+        entity.update(cx, |this, cx| this.load(key, candidates(list), max, cx));
         None
     }
 

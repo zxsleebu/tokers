@@ -50,14 +50,17 @@ pub fn enabled() -> bool {
 
 pub struct Ambient {
     started: Instant,
+    /// The last render (whatever asked for it: the page under it repaints the window too).
     stepped: Instant,
     painted: Option<[Hsla; BLOBS]>,
+    /// A repaint is waiting for its frame.
+    armed: bool,
 }
 
 impl Ambient {
     pub fn new(_cx: &mut Context<Self>) -> Self {
         let now = Instant::now();
-        Ambient { started: now, stepped: now, painted: None }
+        Ambient { started: now, stepped: now, painted: None, armed: false }
     }
 
     /// Eases the painted colours one frame toward `target`.
@@ -128,7 +131,10 @@ impl Render for Ambient {
         // Frames come off the display's clock: a timer is never in phase with the
         // refresh, and a slow drift on one reads as a twitch.
         let elapsed = if animates {
-            arm(window, cx.entity().downgrade(), Instant::now());
+            if !self.armed {
+                self.armed = true;
+                arm(window, cx.entity().downgrade());
+            }
             self.started.elapsed().as_secs_f32()
         } else {
             0.
@@ -195,14 +201,19 @@ impl Render for Ambient {
     }
 }
 
-/// Repaint on the first vsync at least `FRAME` after `since`: frames stay in phase
-/// with the display, at no more than 60 a second.
-fn arm(window: &mut Window, ambient: WeakEntity<Ambient>, since: Instant) {
+/// Repaint on the first vsync at least `FRAME` after the last render: frames stay in
+/// phase with the display, at no more than 60 a second, and one the video asked for
+/// counts (a timer per render had the field repainted again a frame after each of them).
+fn arm(window: &mut Window, ambient: WeakEntity<Ambient>) {
     window.on_next_frame(move |window, cx| {
-        if since.elapsed() + Duration::from_millis(2) >= FRAME {
-            ambient.update(cx, |_, cx| cx.notify()).ok();
+        let Some(this) = ambient.upgrade() else { return };
+        if this.read(cx).stepped.elapsed() + Duration::from_millis(2) >= FRAME {
+            this.update(cx, |this, cx| {
+                this.armed = false;
+                cx.notify();
+            });
         } else {
-            arm(window, ambient, since);
+            arm(window, ambient);
         }
     });
 }

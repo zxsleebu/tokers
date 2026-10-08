@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::{
     Context, DispatchPhase, Entity, EntityId, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, Window, canvas, div, point, px,
+    MouseUpEvent, Pixels, Render, ScrollHandle, ScrollWheelEvent, Task, Window, canvas, div, point, px,
 };
 
 use crate::glide::Glide;
@@ -70,6 +70,9 @@ pub struct Scrollbar {
     /// The view that draws the scrolled content (repainted while dragging and gliding).
     owner: Option<EntityId>,
     glide: Glide,
+    /// Hides the bar once `awake_until` has passed; each wake replaces it (a timer per
+    /// wheel event repainted the scrolled view once more for every one of them).
+    sleep: Option<Task<()>>,
 }
 
 impl Scrollbar {
@@ -82,6 +85,7 @@ impl Scrollbar {
             opacity: Spring::new(Springs::RESPONSIVE, 0.),
             owner: None,
             glide: Glide::default(),
+            sleep: None,
         }
     }
 
@@ -137,11 +141,10 @@ impl Scrollbar {
     pub fn wake(&mut self, cx: &mut Context<Self>) {
         self.awake_until = Instant::now() + LINGER;
         cx.notify();
-        cx.spawn(async move |this, cx| {
+        self.sleep = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(LINGER + Duration::from_millis(20)).await;
             this.update(cx, |_, cx| cx.notify()).ok();
-        })
-        .detach();
+        }));
     }
 
     /// The pointer is over the scrolled area.

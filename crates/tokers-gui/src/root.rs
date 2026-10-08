@@ -1157,11 +1157,10 @@ impl Render for Root {
         let feed = self.active_feed().cloned();
         let (tint, ambient) = match &feed {
             Some(feed) => {
-                let current = feed.read(cx).current().cloned();
-                match current {
-                    Some(aweme) => {
-                        let list = crate::feed::cover(&aweme);
-                        let palette = Images::palette(list, crate::feed::COVER_PX, cx).unwrap_or(self.tint);
+                let cover = feed.read(cx).current().map(|aweme| crate::feed::cover(aweme).clone());
+                match cover {
+                    Some(list) => {
+                        let palette = Images::palette(&list, crate::feed::COVER_PX, cx).unwrap_or(self.tint);
                         (palette, true)
                     }
                     None => (self.tint, true),
