@@ -42,6 +42,7 @@ pub enum Variant {
 
 pub enum CommentsEvent {
     Close,
+    Toast(SharedString),
 }
 
 /// How the loaded comments are shown. The API of the captured app version has no
@@ -747,7 +748,6 @@ impl CommentsView {
         let cid = comment.cid.clone();
         let thread = self.threads.get(&cid);
         let replies = comment.reply_comment_total;
-        let open = thread.is_some_and(|t| t.open);
 
         let mut body = div()
             .flex()
@@ -757,10 +757,19 @@ impl CommentsView {
             .flex_1()
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .min_w_0()
                     .text_size(theme.text(Text::Small))
                     .text_color(theme.muted_foreground)
                     .font_weight(FontWeight::MEDIUM)
-                    .child(comment.user.nickname.clone()),
+                    .child(div().flex_shrink_0().child(comment.user.nickname.clone()))
+                    // a reply to a reply names whom it answers, as in the app: "a ▸ b"
+                    .when(!comment.reply_to_nickname.is_empty(), |el| {
+                        el.child(icon("icons/play-filled.svg").size(px(8.)).text_color(theme.muted_foreground))
+                            .child(div().min_w_0().truncate().child(comment.reply_to_nickname.clone()))
+                    }),
             )
             .when(!comment.text.is_empty(), |el| el.child(div().child(comment.text.clone())))
             .children(media.into_iter().map(|image| {
@@ -777,47 +786,9 @@ impl CommentsView {
             .child(self.meta(comment, cx));
 
         if depth == 0 && replies > 0 {
-            let label = if open {
-                "Скрыть ответы".to_string()
-            } else {
-                format!("Ответы: {}", compact(replies))
-            };
-            let toggle_id = cid.clone();
-            let hover_id = cid.clone();
-            let press_id = cid.clone();
-            let toggle = div()
-                    .id(SharedString::from(format!("thread-{cid}")))
-                    // as wide as its words: the empty space beside it is not a button
-                    .self_start()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .mt_1()
-                    .text_size(theme.text(Text::Small))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.muted_foreground)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.foreground))
-                    .child(div().w(px(20.)).h(px(1.)).bg(theme.border))
-                    .child(label)
-                    .child(
-                        icon(if open { "icons/chevron-up.svg" } else { "icons/chevron-down.svg" })
-                            .size(px(14.))
-                            .text_color(theme.muted_foreground),
-                    )
-                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                        this.dwell_on_thread(hover_id.clone(), *hovered, window.mouse_position().y, cx)
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
-                            this.preload_thread(&press_id, e.position.y, cx)
-                        }),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_thread(&toggle_id, cx)));
-            // the toggle and its replies as one child of the row: no gap opens before the
-            // replies have any height
-            let mut thread_el = div().flex().flex_col().child(toggle);
+            // the replies unfold above a line that stays under them, as in the app:
+            // "Ответы: N" while closed; "Ещё ответы: N" and "Скрыть" while open
+            let mut thread_el = div().flex().flex_col();
             if let Some(thread) = thread.filter(|t| t.open || t.reveal.value() > 0.) {
                 let rows: Vec<AnyElement> = thread.items.iter().map(|r| self.row(r, 1, cx)).collect();
                 let mut unfolded = div()
@@ -825,37 +796,9 @@ impl CommentsView {
                     .flex_shrink_0()
                     .flex()
                     .flex_col()
-                    .gap_1()
                     .pt_2()
+                    .pb_3()
                     .child(div().flex().flex_col().gap_3().children(rows));
-                if thread.loading {
-                    unfolded = unfolded.child(div().py_1().child(spinner(
-                        SharedString::from(format!("spin-{cid}")),
-                        px(14.),
-                        theme.muted_foreground,
-                    )));
-                } else if thread.has_more && !thread.items.is_empty() {
-                    let more_id = cid.clone();
-                    let left = replies.saturating_sub(thread.items.len() as u64);
-                    unfolded = unfolded.child(
-                        div()
-                            .id(SharedString::from(format!("more-{cid}")))
-                            // as wide as its words: the empty space beside it is not a button
-                            .self_start()
-                            .text_size(theme.text(Text::Small))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.foreground))
-                            .child(match left {
-                                0 => "Ещё ответы".to_string(),
-                                n => format!("Ещё ответы: {}", compact(n)),
-                            })
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.load_replies(more_id.clone(), cx)),
-                            ),
-                    );
-                }
                 // measures the replies for the spring; a change of size asks for the frame
                 // that starts it moving
                 let natural = thread.natural.clone();
@@ -885,7 +828,7 @@ impl CommentsView {
                         .child(unfolded),
                 );
             }
-            body = body.child(thread_el);
+            body = body.child(thread_el.child(self.thread_line(comment, cx)));
         }
 
         div()
@@ -894,6 +837,73 @@ impl CommentsView {
             .child(avatar_el(avatar, size, &comment.user.nickname, theme.secondary, theme.muted_foreground))
             .child(body)
             .into_any_element()
+    }
+
+    /// The line under a thread: "Ответы: N" opens it (resting on it or pressing it fetches
+    /// ahead); an open one offers the next page and "Скрыть".
+    fn thread_line(&self, comment: &Comment, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let cid = comment.cid.clone();
+        let replies = comment.reply_comment_total;
+        let thread = self.threads.get(&cid);
+        let open = thread.is_some_and(|t| t.open);
+        let link = |key: &str, label: String, chevron: &'static str| {
+            div()
+                .id(SharedString::from(format!("{key}-{cid}")))
+                .flex()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .hover(|s| s.text_color(theme.foreground))
+                .child(label)
+                .child(icon(chevron).size(px(14.)).text_color(theme.muted_foreground))
+        };
+        let mut line = div()
+            .flex()
+            .items_center()
+            .gap_4()
+            .mt_1()
+            .text_size(theme.text(Text::Small))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.muted_foreground)
+            .child(div().w(px(20.)).h(px(1.)).mr(-px(8.)).bg(theme.border));
+        if !open {
+            let (toggle_id, hover_id, press_id) = (cid.clone(), cid.clone(), cid.clone());
+            line = line.child(
+                link("thread", format!("Ответы: {}", compact(replies)), "icons/chevron-down.svg")
+                    .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                        this.dwell_on_thread(hover_id.clone(), *hovered, window.mouse_position().y, cx)
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
+                            this.preload_thread(&press_id, e.position.y, cx)
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_thread(&toggle_id, cx))),
+            );
+            return line.into_any_element();
+        }
+        let thread = thread.expect("an open thread exists");
+        if thread.loading {
+            line = line.child(spinner(SharedString::from(format!("spin-{cid}")), px(14.), theme.muted_foreground));
+        } else if thread.has_more && !thread.items.is_empty() {
+            let more_id = cid.clone();
+            let label = match replies.saturating_sub(thread.items.len() as u64) {
+                0 => "Ещё ответы".to_string(),
+                n => format!("Ещё ответы: {}", compact(n)),
+            };
+            line = line.child(
+                link("more", label, "icons/chevron-down.svg")
+                    .on_click(cx.listener(move |this, _, _, cx| this.load_replies(more_id.clone(), cx))),
+            );
+        }
+        let hide_id = cid.clone();
+        line.child(
+            link("hide", "Скрыть".to_string(), "icons/chevron-up.svg")
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_thread(&hide_id, cx))),
+        )
+        .into_any_element()
     }
 
     /// Age on the left; like (with its count) and dislike on the right, as in the app.
@@ -928,8 +938,22 @@ impl CommentsView {
             .child(
                 div()
                     .flex_1()
-                    .text_color(theme.muted_foreground.opacity(0.75))
-                    .child(ago(comment.create_time)),
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .child(div().text_color(theme.muted_foreground.opacity(0.75)).child(ago(comment.create_time)))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("reply-{}", comment.cid)))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(theme.foreground))
+                            .child("Ответить")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(CommentsEvent::Toast("Чтобы отвечать, нужен вход в аккаунт — его пока нет".into()));
+                            })),
+                    ),
             )
             .child(
                 // a fixed slot, so the dislikes line up whatever the count

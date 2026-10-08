@@ -493,6 +493,7 @@ impl FeedView {
             cx.new(|cx| CommentsView::new(self.tiktok.urgent(), self.io.clone(), aweme, wait, height, cx));
         cx.subscribe(&view, |this, _, event, cx| match event {
             CommentsEvent::Close => this.close_comments(cx),
+            CommentsEvent::Toast(text) => cx.emit(FeedEvent::Toast(text.clone())),
         })
         .detach();
         self.comment_views.insert(id, view.clone());

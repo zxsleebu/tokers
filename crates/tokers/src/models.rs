@@ -345,6 +345,11 @@ pub struct Comment {
     /// On a reply to a reply: the reply it answers.
     #[serde(deserialize_with = "de::string")]
     pub reply_to_reply_id: String,
+    /// On a reply to a reply: whom it answers (empty otherwise).
+    #[serde(deserialize_with = "de::string")]
+    pub reply_to_nickname: String,
+    #[serde(deserialize_with = "de::string")]
+    pub reply_to_username: String,
     #[serde(deserialize_with = "de::nullable")]
     pub user: User,
     #[serde(deserialize_with = "de::nullable")]
