@@ -43,6 +43,8 @@ const LIGHT_ALPHA: f32 = 0.22;
 const LIGHT_PAD: f32 = 6.;
 /// The quote's bar.
 const QUOTE_BAR: f32 = 3.;
+/// Replies are drawn this share of the panel above and below it; further off, blanks.
+const DRAWN_PAST: f32 = 0.25;
 
 /// Resting on "Ответы" this long fetches the replies before the click (passing over doesn't).
 const THREAD_DWELL: Duration = Duration::from_millis(500);
@@ -101,6 +103,8 @@ enum Vote {
 /// Comment rows, measured off the phone app: avatar 12 from the left, likes 14 from the right.
 const ROW_LEFT: f32 = 12.;
 const ROW_RIGHT: f32 = 14.;
+const AVATAR: f32 = 36.;
+const REPLY_AVATAR: f32 = 24.;
 
 /// How fast a thread's replies unfold and fold back.
 const UNFOLD: SpringConfig = Springs::RESPONSIVE;
@@ -159,6 +163,18 @@ pub struct CommentsView {
     quotes: bool,
     /// Where each reply was last painted, for a quote to scroll to it.
     spots: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// Where (in the last paint's window coordinates) a reply has to have been to be drawn
+    /// this frame; one well outside it, painted at today's width, is a blank of its last
+    /// size. An open thread is a single row of the list, and laying out every reply in it
+    /// on each frame of a scroll is what made scrolling past a long thread slow.
+    band: Option<(Pixels, Pixels)>,
+    /// The list's scroll offset at the last render.
+    painted_offset: Pixels,
+    /// How wide the list is (from the feed's layout), and so how wide a comment's text is
+    /// and a reply's: given outright, so laying a row out doesn't first measure its whole
+    /// content to find out (most of the time a scroll took went there).
+    width: Option<Pixels>,
+    text_width: [Option<Pixels>; 2],
     /// The reply a quote just led to, lit for a moment (with a count, to restart the light).
     lit: Option<(String, usize)>,
     lights: usize,
@@ -202,6 +218,8 @@ impl CommentsView {
             let quotes = Store::prefs(cx).reply_quotes;
             if quotes != this.quotes {
                 this.quotes = quotes;
+                // the replies change height: none is left blank at its old one
+                this.spots.borrow_mut().clear();
                 this.list.remeasure();
                 cx.notify();
             }
@@ -247,6 +265,10 @@ impl CommentsView {
             votes: HashMap::new(),
             quotes: Store::prefs(cx).reply_quotes,
             spots: Rc::default(),
+            band: None,
+            painted_offset: Pixels::ZERO,
+            width: None,
+            text_width: [None; 2],
             lit: None,
             lights: 0,
             back: None,
@@ -279,7 +301,9 @@ impl CommentsView {
         this
     }
 
-    pub fn set_variant(&mut self, variant: Variant, cx: &mut Context<Self>) {
+    /// Where it is shown, and how wide.
+    pub fn set_variant(&mut self, variant: Variant, width: f32, cx: &mut Context<Self>) {
+        self.width = Some(px(width));
         if self.variant != variant {
             self.variant = variant;
             self.list.reset(self.row_count());
@@ -659,8 +683,8 @@ impl CommentsView {
                 .child(self.footer(cx))
                 .into_any_element();
         }
-        let comment = self.items[self.shown[ix - self.lead()]].clone();
-        if let Some(thread) = self.threads.get_mut(&comment.cid) {
+        let at = self.shown[ix - self.lead()];
+        if let Some(thread) = self.threads.get_mut(&self.items[at].cid) {
             let natural = thread.natural.get();
             let target = if thread.open { f32::from(natural.height) } else { 0. };
             // a new width (the window resized) rewraps the replies: follow at once, no slide
@@ -675,11 +699,12 @@ impl CommentsView {
             thread.reveal.tick(window, cx);
         }
         div()
+            .when_some(self.width, |el, width| el.w(width))
             .pl(px(ROW_LEFT))
             .pr(px(ROW_RIGHT))
             .pb_5()
             .when(first, |el| el.pt_4())
-            .child(self.row(&comment, 0, cx))
+            .child(self.row(&self.items[at], 0, cx))
             .into_any_element()
     }
 
@@ -778,7 +803,8 @@ impl CommentsView {
 
     fn row(&self, comment: &Comment, depth: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
-        let size = if depth == 0 { px(36.) } else { px(24.) };
+        let size = px(if depth == 0 { AVATAR } else { REPLY_AVATAR });
+        let width = self.text_width[depth.min(1)];
         let avatar = Images::get_for(&self.aweme.aweme_id, &comment.user.avatar_thumb, 64, cx);
         let media: Vec<_> = comment
             .media()
@@ -792,14 +818,16 @@ impl CommentsView {
         let quote = (depth > 0 && self.quotes)
             .then(|| self.answered(comment))
             .flatten()
-            .and_then(|answered| self.quote(comment, &answered, cx));
+            .and_then(|answered| self.quote(comment, answered, cx));
 
         let mut body = div()
             .flex()
             .flex_col()
             .gap_1()
-            .min_w_0()
-            .flex_1()
+            .map(|el| match width {
+                Some(width) => el.flex_none().w(width),
+                None => el.min_w_0().flex_1(),
+            })
             .child(
                 div()
                     .flex()
@@ -836,12 +864,14 @@ impl CommentsView {
             // "Ответы: N" while closed; "Ещё ответы: N" and "Скрыть" while open
             let mut thread_el = div().flex().flex_col();
             if let Some(thread) = thread.filter(|t| t.open || t.reveal.value() > 0.) {
-                let rows: Vec<AnyElement> = thread.items.iter().map(|r| self.row(r, 1, cx)).collect();
+                let rows: Vec<AnyElement> = thread.items.iter().map(|r| self.reply(r, cx)).collect();
+                // out of the flow of the clip around it, and a block (as a flex column it
+                // shrank its replies to what the clip let through): its height is its own
                 let mut unfolded = div()
-                    .relative()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
                     .pt_2()
                     .pb_3()
                     .child(div().flex().flex_col().gap_3().children(rows));
@@ -868,6 +898,7 @@ impl CommentsView {
                 let share = if full > 0. { (shown / full).clamp(0., 1.) } else { 0. };
                 thread_el = thread_el.child(
                     div()
+                        .relative()
                         .h(px(shown))
                         // only the height is cut: a lit reply reaches past the sides
                         .overflow_y_hidden()
@@ -912,14 +943,42 @@ impl CommentsView {
         }
     }
 
+    /// A reply, or while it is well out of view (see `band`) a blank of the size it was
+    /// painted at, which notes where it is like the reply would.
+    fn reply(&self, reply: &Comment, cx: &mut Context<Self>) -> AnyElement {
+        // a reply row spans its parent's text, and the room to light up either side
+        let wide = self.text_width[0].map(|w| w + px(2. * LIGHT_PAD));
+        let away = self.band.zip(wide).and_then(|((top, bottom), wide)| {
+            let spot = self.spots.borrow().get(&reply.cid).copied()?;
+            let same = (spot.size.width - wide).abs() < px(0.5);
+            (same && (spot.bottom() < top || spot.top() > bottom)).then_some(spot)
+        });
+        let Some(spot) = away else { return self.row(reply, 1, cx) };
+        let (spots, cid) = (self.spots.clone(), reply.cid.clone());
+        // the reply's own box, without the room it lights up in (noted back with it)
+        div()
+            .relative()
+            .flex_none()
+            .h(spot.size.height - px(2. * LIGHT_PAD))
+            .child(
+                canvas(
+                    move |bounds, _, _| _ = spots.borrow_mut().insert(cid, bounds.dilate(px(LIGHT_PAD))),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
     /// The reply this one answers, when it is loaded (the thread runs oldest first, so it
     /// usually is).
-    fn answered(&self, reply: &Comment) -> Option<Comment> {
+    fn answered(&self, reply: &Comment) -> Option<&Comment> {
         if matches!(reply.reply_to_reply_id.as_str(), "" | "0") {
             return None;
         }
         let thread = self.threads.get(&reply.reply_id)?;
-        thread.items.iter().find(|r| r.cid == reply.reply_to_reply_id).cloned()
+        thread.items.iter().find(|r| r.cid == reply.reply_to_reply_id)
     }
 
     /// The start of the answered reply's text (its author is named above it); a click
@@ -1240,16 +1299,27 @@ impl CommentsView {
 }
 
 impl Render for CommentsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
         if self.list.item_count() != self.row_count() {
             self.list.reset(self.row_count());
         }
         self.scrollbar.read(cx).sync();
-        let height = f32::from(self.list.viewport_bounds().size.height);
+        let view = self.list.viewport_bounds();
+        let height = f32::from(view.size.height);
         if height > 0. {
             self.viewport_h = height;
         }
+        // the view and a little either side, where the replies were last painted (the list
+        // has moved by `moved` since: the guess is exact unless something above changed size)
+        let offset = self.list.scroll_px_offset_for_scrollbar().y;
+        let moved = offset - self.painted_offset;
+        let past = view.size.height * DRAWN_PAST;
+        self.band = (height > 0.).then(|| (view.top() - past - moved, view.bottom() + past - moved));
+        self.painted_offset = offset;
+        let gap = gpui::rems(0.5).to_pixels(window.rem_size());
+        let comment = self.width.map(|w| w - px(ROW_LEFT + ROW_RIGHT + AVATAR) - gap);
+        self.text_width = [comment, comment.map(|w| w - px(REPLY_AVATAR) - gap)];
         let bar = self.scrollbar.clone();
         div()
             .id("comments")

@@ -11,7 +11,7 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, AnyView, Bounds, Context, Entity, EventEmitter, FontWeight, Hsla, MouseButton, ObjectFit,
     Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, SpringConfig, StyleRefinement,
-    Task, TouchPhase, Window, canvas, div, img, linear_color_stop, linear_gradient, px, size,
+    Task, TouchPhase, WeakEntity, Window, canvas, div, img, linear_color_stop, linear_gradient, px, size,
 };
 use tokers::TikTok;
 use tokers::endpoints::Feed;
@@ -92,6 +92,11 @@ const LENS_STRETCH_SPEED: f32 = 1600.;
 const LENS_WAIST: f32 = 0.38;
 /// A pressed face squeezes in and springs back past its size.
 const SQUISH: Duration = Duration::from_millis(560);
+/// The record turns once in this long...
+const DISC_TURN: Duration = Duration::from_secs(5);
+/// ...and is redrawn at least this often. The video's frames usually come first and turn it
+/// along; as a repeating animation it repainted the whole feed on every refresh of the display.
+const DISC_FRAME: Duration = Duration::from_millis(33);
 
 /// The glass drop behind the hovered button of the current stack, moved by springs as in
 /// Sonora (state stepped every frame, velocity kept across retargets): it flows from button to
@@ -260,6 +265,11 @@ pub struct FeedView {
     /// How far into wide mode (0..1, the spring): the panel shows the comments, so their
     /// button folds away.
     wide_t: f32,
+    /// When the feed was last rendered, and whether a repaint for the record is waiting.
+    rendered_at: Instant,
+    disc_armed: bool,
+    /// The record's angle counts from here.
+    disc_epoch: Instant,
 }
 
 impl EventEmitter<FeedEvent> for FeedView {}
@@ -335,6 +345,9 @@ impl FeedView {
             beside_anim: Spring::new(Springs::PANEL, 1.),
             clear_buttons: false,
             wide_t: 0.,
+            rendered_at: Instant::now(),
+            disc_armed: false,
+            disc_epoch: Instant::now(),
         }
     }
 
@@ -1329,7 +1342,8 @@ impl FeedView {
                             .child(sound_disc(
                                 music_cover,
                                 music,
-                                current && self.current_player().is_some_and(|p| p.read(cx).is_playing()),
+                                (current && self.current_player().is_some_and(|p| p.read(cx).is_playing()))
+                                    .then(|| self.disc_epoch.elapsed().as_secs_f32() / DISC_TURN.as_secs_f32() % 1.),
                                 theme.secondary,
                             ))
                             .when(current, |el| {
@@ -1369,6 +1383,7 @@ impl FeedView {
 
 impl Render for FeedView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.rendered_at = Instant::now();
         let theme = *cx.theme();
         let viewport = window.viewport_size();
         let sheet_t = self.sheet.tick(window, cx).clamp(0., 1.);
@@ -1573,6 +1588,9 @@ impl Render for FeedView {
         let picture = frame.map(|f| (fitted(f.w as f32 / f.h as f32), f));
         self.shade_buttons(picture, glow_at, origin, 1. - closed.beside, window, cx);
         if let Some(actions) = closed.actions.filter(|_| sheet_t < 0.99) {
+            if self.current_player().is_some_and(|p| p.read(cx).is_playing()) {
+                self.turn_disc(window, cx);
+            }
             let stacks: Vec<AnyElement> = (lo..=hi)
                 .filter(|&i| in_view(i))
                 .map(|i| {
@@ -1616,7 +1634,7 @@ impl Render for FeedView {
             // the panel stays while the next video's comments are on their way
             let body = match &self.comments {
                 Some(comments) => {
-                    comments.update(cx, |c, cx| c.set_variant(Variant::Panel, cx));
+                    comments.update(cx, |c, cx| c.set_variant(Variant::Panel, panel.w, cx));
                     div()
                         .size_full()
                         .child(AnyView::from(comments.clone()).cached(StyleRefinement::default().size_full()))
@@ -1644,7 +1662,7 @@ impl Render for FeedView {
         if sheet_t > 0.001
             && let (Some(sheet), Some(comments)) = (open.comments_sheet, &self.comments)
         {
-            comments.update(cx, |c, cx| c.set_variant(Variant::Sheet, cx));
+            comments.update(cx, |c, cx| c.set_variant(Variant::Sheet, sheet.w, cx));
             let slide = (1. - sheet_t) * sheet.h;
             root = root.child(
                 div()
@@ -1667,6 +1685,29 @@ impl Render for FeedView {
 }
 
 impl FeedView {
+    /// Repaints the turning record when nothing else has (a photo post has no video frames):
+    /// on the first refresh `DISC_FRAME` after the feed's last render.
+    fn turn_disc(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        fn arm(window: &mut Window, feed: WeakEntity<FeedView>) {
+            window.on_next_frame(move |window, cx| {
+                let Some(this) = feed.upgrade() else { return };
+                // only looked at until it is time: an update on every refresh redrew the window
+                if this.read(cx).rendered_at.elapsed() + Duration::from_millis(2) < DISC_FRAME {
+                    arm(window, feed);
+                    return;
+                }
+                this.update(cx, |this, cx| {
+                    this.disc_armed = false;
+                    cx.notify();
+                });
+            });
+        }
+        if !self.disc_armed {
+            self.disc_armed = true;
+            arm(window, cx.entity().downgrade());
+        }
+    }
+
     /// Author, description and sound over the bottom of the video.
     fn caption(&self, aweme: &Aweme, current: bool, height: f32, cx: &mut Context<Self>) -> AnyElement {
         let theme = *cx.theme();
@@ -1785,10 +1826,11 @@ fn photo_dots(count: usize, at: usize, accent: Hsla) -> impl IntoElement {
 }
 
 /// The spinning record: the sound's cover in a groove that turns while the video plays.
+/// `turn`: how far round it is (0..1), `None` while it stands still.
 fn sound_disc(
     cover: Option<std::sync::Arc<gpui::RenderImage>>,
     link: Option<String>,
-    spinning: bool,
+    turn: Option<f32>,
     ring: Hsla,
 ) -> impl IntoElement {
     let white = gpui::white();
@@ -1797,14 +1839,9 @@ fn sound_disc(
         None => icon("icons/music-2.svg").size(px(18.)).text_color(white).into_any_element(),
     };
     let groove = icon("icons/disc-3.svg").size(px(44.)).text_color(white.opacity(0.2));
-    let groove = if spinning {
-        groove
-            .with_animation("disc-spin", gpui::Animation::new(Duration::from_secs(5)).repeat(), |el, t| {
-                el.with_transformation(gpui::Transformation::rotate(gpui::percentage(t)))
-            })
-            .into_any_element()
-    } else {
-        groove.into_any_element()
+    let groove = match turn {
+        Some(t) => groove.with_transformation(gpui::Transformation::rotate(gpui::percentage(t))),
+        None => groove,
     };
     div()
         .id("sound")
