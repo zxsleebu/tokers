@@ -39,6 +39,8 @@ const LANDING: f32 = 0.25;
 const LIGHT_FOR: Duration = Duration::from_millis(1400);
 const LIGHT_ALPHA: f32 = 0.22;
 const LIGHT_PAD: f32 = 6.;
+/// The quote's bar.
+const QUOTE_BAR: f32 = 3.;
 
 /// Resting on "Ответы" this long fetches the replies before the click (passing over doesn't).
 const THREAD_DWELL: Duration = Duration::from_millis(500);
@@ -780,7 +782,7 @@ impl CommentsView {
         let quote = (depth > 0 && self.quotes)
             .then(|| self.answered(comment))
             .flatten()
-            .map(|answered| self.quote(comment, &answered, cx));
+            .and_then(|answered| self.quote(comment, &answered, cx));
 
         let mut body = div()
             .flex()
@@ -910,48 +912,40 @@ impl CommentsView {
         thread.items.iter().find(|r| r.cid == reply.reply_to_reply_id).cloned()
     }
 
-    /// The answered reply in brief: its author and the start of its text; a click scrolls
-    /// to it.
-    fn quote(&self, reply: &Comment, answered: &Comment, cx: &mut Context<Self>) -> AnyElement {
+    /// The start of the answered reply's text (its author is named above it); a click
+    /// scrolls to it.
+    fn quote(&self, reply: &Comment, answered: &Comment, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = *cx.theme();
         let text = match answered.media().first().map(|m| m.kind) {
             _ if !answered.text.is_empty() => answered.text.clone(),
             Some(MediaKind::Sticker) => "Стикер".to_string(),
             Some(MediaKind::Photo) => "Фото".to_string(),
-            None => String::new(),
+            None => return None,
         };
         let to = answered.cid.clone();
-        div()
-            .id(SharedString::from(format!("quote-{}", reply.cid)))
-            .flex()
-            .flex_col()
-            .min_w_0()
-            .my_0p5()
-            .pl_2()
-            .pr_2p5()
-            .py_1()
-            .rounded(inset_radius(theme.radius, px(4.)))
-            .border_l_2()
-            .border_color(theme.primary.opacity(0.7))
-            .bg(theme.secondary.opacity(0.6))
-            .text_size(theme.text(Text::Small))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.secondary_hover))
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.primary)
-                    .truncate()
-                    .child(answered.user.nickname.clone()),
-            )
-            .when(!text.is_empty(), |el| {
-                el.child(div().text_color(theme.muted_foreground).line_clamp(2).child(text))
-            })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                this.scroll_to_reply(&to, window, cx);
-            }))
-            .into_any_element()
+        Some(
+            div()
+                .id(SharedString::from(format!("quote-{}", reply.cid)))
+                .flex()
+                .gap_2()
+                .min_w_0()
+                .my_0p5()
+                .p_1p5()
+                .pr_2p5()
+                .rounded(inset_radius(theme.radius, px(4.)))
+                .bg(theme.secondary.opacity(0.6))
+                .text_size(theme.text(Text::Small))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.secondary_hover))
+                // a bar of its own, a pill as tall as the text: a border would bend with the corners
+                .child(div().flex_none().w(px(QUOTE_BAR)).rounded_full().bg(theme.primary.opacity(0.7)))
+                .child(div().min_w_0().text_color(theme.muted_foreground).line_clamp(2).child(text))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.scroll_to_reply(&to, window, cx);
+                }))
+                .into_any_element(),
+        )
     }
 
     /// Glides the reply to a quarter down the panel and lights it up.
