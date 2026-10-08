@@ -281,7 +281,9 @@ impl Root {
                 if !matches!(still, Ok(true)) || t >= 1. {
                     break;
                 }
-                cx.background_executor().timer(Duration::from_millis(8)).await;
+                // each step re-renders every view (the colours are everywhere): 60 a
+                // second are as smooth over a fade this short
+                cx.background_executor().timer(Duration::from_millis(16)).await;
             }
         })
         .detach();
