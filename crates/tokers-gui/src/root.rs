@@ -33,6 +33,10 @@ const ROW_GAP: f32 = 4.;
 const NAV_PAD: f32 = 10.;
 const TOAST_FOR: Duration = Duration::from_millis(2200);
 const THEME_FADE: Duration = Duration::from_millis(450);
+/// The volume slider in the title bar, and one wheel notch on it: with the 50 dB taper
+/// (`Prefs::gain`) a notch is 1 dB, fifty from silent to full.
+const VOLUME_WIDTH: f32 = 96.;
+const VOLUME_STEP: f32 = 0.02;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -82,6 +86,9 @@ pub struct Root {
     /// The settings dropdown that is open, and where its button was painted.
     settings_menu: Option<&'static str>,
     menu_at: Rc<Cell<Bounds<Pixels>>>,
+    /// The pointer is over the volume control, or drags its slider: the level shows.
+    volume_over: bool,
+    volume_held: bool,
 }
 
 /// The categories of the settings page, as in Sonora's category bar.
@@ -169,6 +176,8 @@ impl Root {
             settings_tab: SettingsTab::General,
             settings_menu: None,
             menu_at: Rc::default(),
+            volume_over: false,
+            volume_held: false,
         }
     }
 
@@ -377,42 +386,80 @@ impl Root {
     }
 
     fn volume(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = *cx.theme();
         let prefs = Store::prefs(cx).clone();
-        let silent = prefs.muted || prefs.volume <= 0.001;
+        let silent = prefs.muted || prefs.volume <= 0.;
+        let icon = match prefs.volume {
+            _ if silent => "icons/volume-x.svg",
+            v if v < 1. / 3. => "icons/volume.svg",
+            v if v < 2. / 3. => "icons/volume-1.svg",
+            _ => "icons/volume-2.svg",
+        };
+        let bubble = (self.volume_over || self.volume_held)
+            .then(|| SharedString::from(format!("{}%", (prefs.volume * 100.).round())));
+        let me = cx.entity().downgrade();
+        let released = me.clone();
+        let level = slider(
+            "volume",
+            prefs.volume,
+            move |v, cx| {
+                me.update(cx, |this, cx| {
+                    this.volume_held = true;
+                    cx.notify();
+                })
+                .ok();
+                Store::tweak_prefs(cx, |p| {
+                    p.volume = v;
+                    p.muted = false;
+                });
+            },
+            move |cx| {
+                released
+                    .update(cx, |this, cx| {
+                        if std::mem::take(&mut this.volume_held) {
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                Store::save_prefs(cx);
+            },
+            cx,
+        )
+        .dimmed(silent)
+        .bubble(bubble);
         div()
             .id("volume")
             .flex()
             .items_center()
-            .gap_2()
-            .px_2()
-            .h(px(26.))
-            .rounded(theme.radius)
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.secondary_hover))
+            .gap_1()
+            .pr_1()
+            .on_hover(cx.listener(|this, over: &bool, _, cx| {
+                this.volume_over = *over;
+                cx.notify();
+            }))
             .child(
-                icon(if silent { "icons/volume-x.svg" } else { "icons/volume-2.svg" })
-                    .size(px(16.))
-                    .text_color(theme.foreground),
+                Button::new("mute")
+                    .icon(icon)
+                    .small()
+                    .on_click(|_, _, cx| Store::update_prefs(cx, |p| p.muted = !p.muted)),
             )
-            .child(
-                div().w(px(56.)).h(px(4.)).rounded_full().bg(theme.muted).child(
-                    div()
-                        .h_full()
-                        .rounded_full()
-                        .bg(if silent { theme.muted_foreground } else { theme.primary })
-                        .w(gpui::relative(if prefs.muted { 0. } else { prefs.volume })),
-                ),
-            )
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(|_, _, cx| Store::update_prefs(cx, |p| p.muted = !p.muted))
-            .on_scroll_wheel(|e: &ScrollWheelEvent, _, cx| {
-                let step = match e.delta {
-                    ScrollDelta::Lines(l) => l.y * 0.05,
-                    ScrollDelta::Pixels(p) => f32::from(p.y) * 0.002,
+            .child(div().w(px(VOLUME_WIDTH)).child(level))
+            .on_scroll_wheel(|e: &ScrollWheelEvent, window, cx| {
+                // a wheel notch is one step; a touchpad glides through them
+                let notches = match e.delta {
+                    ScrollDelta::Lines(l) => l.y,
+                    ScrollDelta::Pixels(p) => p.y / window.line_height(),
                 };
+                if notches == 0. {
+                    return;
+                }
+                cx.stop_propagation();
                 Store::update_prefs(cx, |p| {
-                    p.volume = (p.volume + step).clamp(0., 1.);
+                    let to = p.volume + notches * VOLUME_STEP;
+                    p.volume = match e.delta {
+                        ScrollDelta::Lines(_) => (to / VOLUME_STEP).round() * VOLUME_STEP,
+                        ScrollDelta::Pixels(_) => to,
+                    }
+                    .clamp(0., 1.);
                     p.muted = false;
                 });
             })

@@ -428,7 +428,7 @@ impl FeedView {
             };
             let photo = aweme.is_photo();
             let player = cx.new(|cx| {
-                let mut p = VideoPlayer::new(&uri, max_height, play, prefs.volume as f64, prefs.muted, cx);
+                let mut p = VideoPlayer::new(&uri, max_height, play, prefs.gain(), prefs.muted, cx);
                 p.chrome = !photo;
                 p
             });
@@ -560,7 +560,7 @@ impl FeedView {
     fn apply_volume(&mut self, cx: &mut Context<Self>) {
         let prefs = Store::prefs(cx).clone();
         for player in self.players.values() {
-            player.update(cx, |p, _| p.set_volume(prefs.volume as f64, prefs.muted));
+            player.update(cx, |p, _| p.set_volume(prefs.gain(), prefs.muted));
         }
         cx.notify();
     }

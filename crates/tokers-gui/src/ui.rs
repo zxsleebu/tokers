@@ -369,68 +369,138 @@ pub fn slider(
     value: f32,
     on_change: impl Fn(f32, &mut App) + 'static,
     on_release: impl Fn(&mut App) + 'static,
-    cx: &App,
-) -> impl IntoElement {
-    let theme = cx.theme();
-    let id: SharedString = id.into();
-    let value = value.clamp(0., 1.);
-    let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<Pixels>::default()));
-    let on_change: Slide = std::rc::Rc::new(on_change);
-    let on_release: Done = std::rc::Rc::new(on_release);
-    // the thumb's centre runs from one half-thumb in to the other
-    let at = |x: Pixels, bounds: gpui::Bounds<Pixels>| {
-        let travel = (bounds.size.width - THUMB).max(px(1.));
-        ((x - bounds.origin.x - THUMB / 2.) / travel).clamp(0., 1.)
-    };
-    let (pressed, dragged) = (on_change.clone(), on_change);
-    let (up, up_out) = (on_release.clone(), on_release);
-    let (press_bounds, mine) = (bounds.clone(), id.clone());
-    let inset = THUMB / 2.;
-    div()
-        .id(ElementId::Name(id.clone()))
-        .relative()
-        .h(GRIP)
-        .w_full()
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .child(gpui::canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().inset_0())
-        .child(
-            div().relative().w_full().h(TRACK).rounded_full().bg(theme.muted).child(
-                div().absolute().top_0().bottom_0().left(inset).right(inset).child(
+    _cx: &App,
+) -> Slider {
+    Slider {
+        id: id.into(),
+        value: value.clamp(0., 1.),
+        on_change: std::rc::Rc::new(on_change),
+        on_release: std::rc::Rc::new(on_release),
+        bubble: None,
+        dimmed: false,
+    }
+}
+
+/// Room between the grip's bottom edge and a bubble hanging under it.
+const BUBBLE_GAP: Pixels = px(8.);
+/// Wide enough for "100%": the bubble centres its text in this.
+const BUBBLE_WIDTH: Pixels = px(48.);
+
+#[derive(IntoElement)]
+pub struct Slider {
+    id: SharedString,
+    value: f32,
+    on_change: Slide,
+    on_release: Done,
+    bubble: Option<SharedString>,
+    dimmed: bool,
+}
+
+impl Slider {
+    /// A label hanging under the thumb (Sonora's scrubber bubble), painted over everything.
+    pub fn bubble(mut self, text: Option<SharedString>) -> Self {
+        self.bubble = text;
+        self
+    }
+
+    /// The fill in the muted colour: the value is kept but not in effect (a muted volume).
+    pub fn dimmed(mut self, dimmed: bool) -> Self {
+        self.dimmed = dimmed;
+        self
+    }
+}
+
+impl RenderOnce for Slider {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = *cx.theme();
+        let Slider { id, value, on_change, on_release, bubble, dimmed } = self;
+        let fill = if dimmed { theme.muted_foreground } else { theme.foreground };
+        let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<Pixels>::default()));
+        // the thumb's centre runs from one half-thumb in to the other
+        let at = |x: Pixels, bounds: gpui::Bounds<Pixels>| {
+            let travel = (bounds.size.width - THUMB).max(px(1.));
+            ((x - bounds.origin.x - THUMB / 2.) / travel).clamp(0., 1.)
+        };
+        let (pressed, dragged) = (on_change.clone(), on_change);
+        let (up, up_out) = (on_release.clone(), on_release);
+        let (press_bounds, mine) = (bounds.clone(), id.clone());
+        let inset = THUMB / 2.;
+        let bubble = bubble.map(|text| {
+            div()
+                .absolute()
+                .top((GRIP + TRACK) / 2. + BUBBLE_GAP)
+                .left(gpui::relative(value))
+                .ml(-BUBBLE_WIDTH / 2.)
+                .w(BUBBLE_WIDTH)
+                .flex()
+                .justify_center()
+                .child(gpui::deferred(
+                    div()
+                        .px_1p5()
+                        .rounded(inset_radius(theme.radius, px(4.)))
+                        .bg(theme.popover)
+                        .border_1()
+                        .border_color(theme.border)
+                        .shadow_md()
+                        .text_color(theme.foreground)
+                        .text_size(theme.text(Text::Tiny))
+                        .whitespace_nowrap()
+                        .child(text),
+                ))
+        });
+        div()
+            .id(ElementId::Name(id.clone()))
+            .relative()
+            .h(GRIP)
+            .w_full()
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .child(gpui::canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().inset_0())
+            .child(
+                div().relative().w_full().h(TRACK).rounded_full().bg(theme.muted).child(
                     div()
                         .absolute()
                         .top_0()
                         .bottom_0()
-                        .left(-inset)
-                        .right(gpui::relative(1. - value))
-                        .rounded_full()
-                        .bg(theme.foreground),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top((TRACK - THUMB) / 2.)
-                        .left(gpui::relative(value))
-                        .ml(-THUMB / 2.)
-                        .size(THUMB)
-                        .rounded_full()
-                        .bg(theme.foreground),
+                        .left(inset)
+                        .right(inset)
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(-inset)
+                                .right(gpui::relative(1. - value))
+                                .rounded_full()
+                                .bg(fill),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top((TRACK - THUMB) / 2.)
+                                .left(gpui::relative(value))
+                                .ml(-THUMB / 2.)
+                                .size(THUMB)
+                                .rounded_full()
+                                .bg(fill),
+                        )
+                        .children(bubble),
                 ),
-            ),
-        )
-        .on_mouse_down(MouseButton::Left, move |e, _, cx| {
-            cx.stop_propagation();
-            pressed(at(e.position.x, press_bounds.get()), cx);
-        })
-        .on_drag(Grab(id), |grab, _, _, cx| cx.new(|_| grab.clone()))
-        .on_drag_move(move |e: &gpui::DragMoveEvent<Grab>, _, cx| {
-            if e.drag(cx).0 == mine {
-                dragged(at(e.event.position.x, e.bounds), cx);
-            }
-        })
-        .on_mouse_up(MouseButton::Left, move |_, _, cx| up(cx))
-        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| up_out(cx))
+            )
+            .on_mouse_down(MouseButton::Left, move |e, _, cx| {
+                cx.stop_propagation();
+                pressed(at(e.position.x, press_bounds.get()), cx);
+            })
+            .on_drag(Grab(id), |grab, _, _, cx| cx.new(|_| grab.clone()))
+            .on_drag_move(move |e: &gpui::DragMoveEvent<Grab>, _, cx| {
+                if e.drag(cx).0 == mine {
+                    dragged(at(e.event.position.x, e.bounds), cx);
+                }
+            })
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| up(cx))
+            .on_mouse_up_out(MouseButton::Left, move |_, _, cx| up_out(cx))
+    }
 }
 
 // ── settings controls, after Sonora's `crates/ui` (switch, separator, label, tabs, menu) ──

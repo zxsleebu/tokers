@@ -24,6 +24,7 @@ pub enum CommentsMode {
 #[serde(default)]
 pub struct Prefs {
     pub comments_mode: CommentsMode,
+    /// Where the volume slider sits, 0 to 1; the player gets [`Prefs::gain`] of it.
     pub volume: f32,
     pub muted: bool,
     pub sidebar: bool,
@@ -46,6 +47,24 @@ impl Default for Prefs {
             button_clarity: 0.75,
             ambilight: true,
         }
+    }
+}
+
+/// The span of the volume slider: its far left end is this much quieter than full.
+const TAPER_DB: f32 = 50.;
+
+impl Prefs {
+    /// The linear gain for the volume, on a decibel taper (as Sonora's): every step of the
+    /// slider changes loudness by the same amount, and the left end is silent.
+    pub fn gain(&self) -> f64 {
+        gain(self.volume) as f64
+    }
+}
+
+fn gain(level: f32) -> f32 {
+    match level.clamp(0., 1.) {
+        level if level <= 0. => 0.,
+        level => 10f32.powf(TAPER_DB * (level - 1.) / 20.),
     }
 }
 
@@ -195,5 +214,20 @@ fn save<T: Serialize>(path: &PathBuf, value: &T) {
     };
     if let Err(e) = write() {
         eprintln!("tokers: saving {}: {e}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gain;
+
+    #[test]
+    fn the_volume_taper_is_even_in_decibels() {
+        assert_eq!(gain(0.), 0.);
+        assert_eq!(gain(1.), 1.);
+        // each tenth of the slider is the same 5 dB
+        let db = |level: f32| 20. * gain(level).log10();
+        assert!((db(0.5) - db(0.4) - 5.).abs() < 1e-3);
+        assert!((db(0.9) - db(0.8) - 5.).abs() < 1e-3);
     }
 }
