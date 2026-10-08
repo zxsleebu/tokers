@@ -90,6 +90,20 @@ impl Glide {
         self.schedule_frame(scroll, window);
     }
 
+    /// Glides `by` from wherever the view is headed (a move to a spot on the page).
+    pub fn glide_by(&self, scroll: &impl ScrollPosition, by: Point<Pixels>, window: &mut Window) {
+        {
+            let mut drift = self.drift.borrow_mut();
+            if !drift.gliding {
+                drift.shown = scroll.offset();
+                drift.target = drift.shown;
+            }
+            drift.target = held(drift.target + by, scroll);
+            drift.gliding = true;
+        }
+        self.schedule_frame(scroll, window);
+    }
+
     /// Lands at `to` at once, ending any glide.
     pub fn jump(&self, scroll: &impl ScrollPosition, to: Point<Pixels>) {
         let landed = {

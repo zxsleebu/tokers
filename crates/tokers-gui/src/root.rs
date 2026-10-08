@@ -760,7 +760,7 @@ impl Root {
 
     fn general_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = *cx.theme();
-        let mode = Store::prefs(cx).comments_mode;
+        let (mode, quotes) = (Store::prefs(cx).comments_mode, Store::prefs(cx).reply_quotes);
         let label = |mode: CommentsMode| match mode {
             CommentsMode::Sheet => "Шторкой снизу",
             CommentsMode::Expand => "Расширять окно",
@@ -782,6 +782,14 @@ impl Root {
                 "В узком окне",
                 "Когда сбоку нет места: шторка снизу или окно растёт вправо",
                 picker,
+                &theme,
+            ),
+            separator(&theme).into_any_element(),
+            setting_row(
+                "Цитата в ответах",
+                "Ответ на ответ показывает, на что отвечает; клик по цитате прокручивает к нему",
+                Switch::new("reply-quotes", quotes)
+                    .on_click(|_, _, cx| Store::update_prefs(cx, |p| p.reply_quotes = !p.reply_quotes)),
                 &theme,
             ),
         ]

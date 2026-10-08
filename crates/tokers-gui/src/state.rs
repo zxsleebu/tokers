@@ -24,6 +24,8 @@ pub enum CommentsMode {
 #[serde(default)]
 pub struct Prefs {
     pub comments_mode: CommentsMode,
+    /// A reply to a reply quotes the reply it answers; a click on the quote scrolls to it.
+    pub reply_quotes: bool,
     /// Where the volume slider sits, 0 to 1; the player gets [`Prefs::gain`] of it.
     pub volume: f32,
     pub muted: bool,
@@ -40,6 +42,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             comments_mode: CommentsMode::Sheet,
+            reply_quotes: true,
             volume: 0.8,
             muted: false,
             sidebar: true,

@@ -99,6 +99,16 @@ impl Scrollbar {
         bar
     }
 
+    /// Glides the content `by` up (negative: down), as a wheel would, to bring a spot into view.
+    pub fn glide_by(&mut self, by: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let by = point(Pixels::ZERO, -by);
+        match &self.target {
+            Target::Area(s) => self.glide.glide_by(s, by, window),
+            Target::List(s) => self.glide.glide_by(s, by, window),
+        }
+        self.wake(cx);
+    }
+
     /// The scrolled surface's wheel handler, after the surface has applied the event:
     /// a mouse wheel notch glides, a touchpad (already fine-grained) stays as it is.
     pub fn wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {

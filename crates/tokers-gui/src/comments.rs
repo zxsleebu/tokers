@@ -1,25 +1,27 @@
 //! Comments of one video: the side panel in wide windows, the bottom sheet otherwise.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Bounds, Context, Entity, EventEmitter, FontWeight, Hsla, ListAlignment, ListScrollEvent,
+    Animation, AnimationExt as _, AnyElement, Bounds, Context, Entity, EventEmitter, FontWeight, Hsla,
+    ListAlignment, ListScrollEvent,
     ListState, MouseButton, ObjectFit, Pixels, Render, ScrollWheelEvent, SharedString, Size, SpringConfig,
-    Task, Window, anchored,
+    Task, Window, anchored, ease_in_out,
     canvas, deferred, div, img, list, point, px,
 };
 use tokers::TikTok;
-use tokers::models::{Aweme, Comment, UrlList};
+use tokers::models::{Aweme, Comment, MediaKind, UrlList};
 
 use crate::media::Images;
 use crate::motion::{Rising as _, Spring, Springs};
 use crate::scrollbar::Scrollbar;
+use crate::state::Store;
 use crate::theme::{ActiveTheme as _, Text};
-use crate::ui::{Button, compact, icon, skeleton, spinner, tucked};
+use crate::ui::{Button, compact, icon, inset_radius, skeleton, spinner, tucked};
 
 const PAGE: u32 = 30;
 /// Avatars and media are fetched ahead for the rows this far below the viewport (a share
@@ -31,6 +33,13 @@ const ROW_MIN: f32 = 56.;
 const REPLY_MIN: f32 = 44.;
 /// Fetch the next page when the last loaded comment is this many rows away.
 const PREFETCH_ROWS: usize = 8;
+/// A quote leads to its reply: the reply lands this share of the panel down, and is lit
+/// this long, this strongly, with this much room around it.
+const LANDING: f32 = 0.25;
+const LIGHT_FOR: Duration = Duration::from_millis(1400);
+const LIGHT_ALPHA: f32 = 0.22;
+const LIGHT_PAD: f32 = 6.;
+
 /// Resting on "Ответы" this long fetches the replies before the click (passing over doesn't).
 const THREAD_DWELL: Duration = Duration::from_millis(500);
 
@@ -142,6 +151,13 @@ pub struct CommentsView {
     desc_open: bool,
     variant: Variant,
     votes: HashMap<String, Vote>,
+    /// Replies quote the reply they answer (a pref, kept to notice it change).
+    quotes: bool,
+    /// Where each reply was last painted, for a quote to scroll to it.
+    spots: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// The reply a quote just led to, lit for a moment (with a count, to restart the light).
+    lit: Option<(String, usize)>,
+    lights: usize,
     /// The first page is not asked for yet (see `new`): the rows show as loading.
     waiting: bool,
     /// The row past the last one in view, as the list last reported.
@@ -175,6 +191,15 @@ impl CommentsView {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&Images::entity(cx), |_, _, cx| cx.notify()).detach();
+        cx.observe(&Store::entity(cx), |this: &mut Self, _, cx| {
+            let quotes = Store::prefs(cx).reply_quotes;
+            if quotes != this.quotes {
+                this.quotes = quotes;
+                this.list.remeasure();
+                cx.notify();
+            }
+        })
+        .detach();
         let total = aweme.statistics.comment_count;
         let list = ListState::new(2, ListAlignment::Top, px(400.));
         let scrollbar = Scrollbar::list(&list, cx.entity_id(), cx);
@@ -209,6 +234,10 @@ impl CommentsView {
             desc_open: false,
             variant: Variant::Panel,
             votes: HashMap::new(),
+            quotes: Store::prefs(cx).reply_quotes,
+            spots: Rc::default(),
+            lit: None,
+            lights: 0,
             waiting: false,
             seen_end: 0,
             viewport_h,
@@ -748,6 +777,10 @@ impl CommentsView {
         let cid = comment.cid.clone();
         let thread = self.threads.get(&cid);
         let replies = comment.reply_comment_total;
+        let quote = (depth > 0 && self.quotes)
+            .then(|| self.answered(comment))
+            .flatten()
+            .map(|answered| self.quote(comment, &answered, cx));
 
         let mut body = div()
             .flex()
@@ -771,6 +804,7 @@ impl CommentsView {
                             .child(div().min_w_0().truncate().child(comment.reply_to_nickname.clone()))
                     }),
             )
+            .when_some(quote, |el, quote| el.child(quote))
             .when(!comment.text.is_empty(), |el| el.child(div().child(comment.text.clone())))
             .children(media.into_iter().map(|image| {
                 // a fixed box: the row keeps its height whether or not the image is in yet
@@ -823,7 +857,8 @@ impl CommentsView {
                 thread_el = thread_el.child(
                     div()
                         .h(px(shown))
-                        .overflow_hidden()
+                        // only the height is cut: a lit reply reaches past the sides
+                        .overflow_y_hidden()
                         .opacity(share.powf(0.6))
                         .child(unfolded),
                 );
@@ -831,12 +866,103 @@ impl CommentsView {
             body = body.child(thread_el.child(self.thread_line(comment, cx)));
         }
 
-        div()
+        let row = div()
             .flex()
             .gap_2()
             .child(avatar_el(avatar, size, &comment.user.nickname, theme.secondary, theme.muted_foreground))
-            .child(body)
+            .child(body);
+        if depth == 0 {
+            return row.into_any_element();
+        }
+        // a reply notes where it was painted, and has room around it to light up in
+        let spots = self.spots.clone();
+        let row = row
+            .relative()
+            .m(-px(LIGHT_PAD))
+            .p(px(LIGHT_PAD))
+            .rounded(theme.radius)
+            .child(
+                canvas(move |bounds, _, _| _ = spots.borrow_mut().insert(cid, bounds), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            );
+        match &self.lit {
+            Some((lit, n)) if *lit == comment.cid => {
+                let light = theme.primary;
+                row.with_animation(
+                    (SharedString::from("lit"), *n),
+                    Animation::new(LIGHT_FOR).with_easing(ease_in_out),
+                    move |row, t| row.bg(light.opacity(LIGHT_ALPHA * (1. - t))),
+                )
+                .into_any_element()
+            }
+            _ => row.into_any_element(),
+        }
+    }
+
+    /// The reply this one answers, when it is loaded (the thread runs oldest first, so it
+    /// usually is).
+    fn answered(&self, reply: &Comment) -> Option<Comment> {
+        if matches!(reply.reply_to_reply_id.as_str(), "" | "0") {
+            return None;
+        }
+        let thread = self.threads.get(&reply.reply_id)?;
+        thread.items.iter().find(|r| r.cid == reply.reply_to_reply_id).cloned()
+    }
+
+    /// The answered reply in brief: its author and the start of its text; a click scrolls
+    /// to it.
+    fn quote(&self, reply: &Comment, answered: &Comment, cx: &mut Context<Self>) -> AnyElement {
+        let theme = *cx.theme();
+        let text = match answered.media().first().map(|m| m.kind) {
+            _ if !answered.text.is_empty() => answered.text.clone(),
+            Some(MediaKind::Sticker) => "Стикер".to_string(),
+            Some(MediaKind::Photo) => "Фото".to_string(),
+            None => String::new(),
+        };
+        let to = answered.cid.clone();
+        div()
+            .id(SharedString::from(format!("quote-{}", reply.cid)))
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .my_0p5()
+            .pl_2()
+            .pr_2p5()
+            .py_1()
+            .rounded(inset_radius(theme.radius, px(4.)))
+            .border_l_2()
+            .border_color(theme.primary.opacity(0.7))
+            .bg(theme.secondary.opacity(0.6))
+            .text_size(theme.text(Text::Small))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.secondary_hover))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.primary)
+                    .truncate()
+                    .child(answered.user.nickname.clone()),
+            )
+            .when(!text.is_empty(), |el| {
+                el.child(div().text_color(theme.muted_foreground).line_clamp(2).child(text))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.scroll_to_reply(&to, window, cx);
+            }))
             .into_any_element()
+    }
+
+    /// Glides the reply to a quarter down the panel and lights it up.
+    fn scroll_to_reply(&mut self, cid: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(spot) = self.spots.borrow().get(cid).copied() else { return };
+        let view = self.list.viewport_bounds();
+        let by = spot.top() - view.top() - view.size.height * LANDING;
+        self.scrollbar.update(cx, |bar, cx| bar.glide_by(by, window, cx));
+        self.lights += 1;
+        self.lit = Some((cid.to_string(), self.lights));
+        cx.notify();
     }
 
     /// The line under a thread: "Ответы: N" opens it (resting on it or pressing it fetches
