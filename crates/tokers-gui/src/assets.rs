@@ -50,6 +50,7 @@ const ICONS: &[(&str, &[u8])] = embed![
     "icons/settings.svg",
     "icons/share-2.svg",
     "icons/user-round.svg",
+    "icons/undo-2.svg",
     "icons/users.svg",
     "icons/volume.svg",
     "icons/volume-1.svg",

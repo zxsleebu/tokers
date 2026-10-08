@@ -21,7 +21,7 @@ use crate::motion::{Rising as _, Spring, Springs};
 use crate::scrollbar::Scrollbar;
 use crate::state::Store;
 use crate::theme::{ActiveTheme as _, Text};
-use crate::ui::{Button, compact, icon, inset_radius, skeleton, spinner, tucked};
+use crate::ui::{Button, compact, icon, inset_radius, perched, skeleton, spinner, tucked};
 
 const PAGE: u32 = 30;
 /// Avatars and media are fetched ahead for the rows this far below the viewport (a share
@@ -36,6 +36,8 @@ const PREFETCH_ROWS: usize = 8;
 /// A quote leads to its reply: the reply lands this share of the panel down, and is lit
 /// this long, this strongly, with this much room around it.
 const LANDING: f32 = 0.25;
+/// A reply this share of the panel (centred) holds is in view: a quote lights it in place.
+const IN_VIEW: f32 = 0.9;
 const LIGHT_FOR: Duration = Duration::from_millis(1400);
 const LIGHT_ALPHA: f32 = 0.22;
 const LIGHT_PAD: f32 = 6.;
@@ -160,6 +162,9 @@ pub struct CommentsView {
     /// The reply a quote just led to, lit for a moment (with a count, to restart the light).
     lit: Option<(String, usize)>,
     lights: usize,
+    /// Where a quote was clicked from (scroll offset, and the reply that quoted): the
+    /// perched button goes back there.
+    back: Option<(Pixels, String)>,
     /// The first page is not asked for yet (see `new`): the rows show as loading.
     waiting: bool,
     /// The row past the last one in view, as the list last reported.
@@ -207,6 +212,10 @@ impl CommentsView {
         let scrollbar = Scrollbar::list(&list, cx.entity_id(), cx);
         list.set_scroll_handler(cx.listener(|this: &mut Self, e: &ListScrollEvent, _, cx| {
             this.scrollbar.update(cx, |bar, cx| bar.wake(cx));
+            if this.back.is_some() {
+                // the way back shows once the view is away from where it was left
+                cx.notify();
+            }
             if this.sort_open {
                 // the menu would be left hanging where the button was
                 this.sort_open = false;
@@ -240,6 +249,7 @@ impl CommentsView {
             spots: Rc::default(),
             lit: None,
             lights: 0,
+            back: None,
             waiting: false,
             seen_end: 0,
             viewport_h,
@@ -922,7 +932,7 @@ impl CommentsView {
             Some(MediaKind::Photo) => "Фото".to_string(),
             None => return None,
         };
-        let to = answered.cid.clone();
+        let (to, from) = (answered.cid.clone(), reply.cid.clone());
         Some(
             div()
                 .id(SharedString::from(format!("quote-{}", reply.cid)))
@@ -942,21 +952,52 @@ impl CommentsView {
                 .child(div().min_w_0().text_color(theme.muted_foreground).line_clamp(2).child(text))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.scroll_to_reply(&to, window, cx);
+                    this.scroll_to_reply(&to, &from, window, cx);
                 }))
                 .into_any_element(),
         )
     }
 
-    /// Glides the reply to a quarter down the panel and lights it up.
-    fn scroll_to_reply(&mut self, cid: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Lights the reply up; when it is not in view (inside `IN_VIEW` of the panel), glides it
+    /// to a quarter down first and offers the way back to `from`, the reply that quoted it.
+    fn scroll_to_reply(&mut self, cid: &str, from: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(spot) = self.spots.borrow().get(cid).copied() else { return };
         let view = self.list.viewport_bounds();
-        let by = spot.top() - view.top() - view.size.height * LANDING;
-        self.scrollbar.update(cx, |bar, cx| bar.glide_by(by, window, cx));
+        let margin = view.size.height * (1. - IN_VIEW) / 2.;
+        let seen = spot.top() >= view.top() + margin && spot.bottom() <= view.bottom() - margin;
+        if !seen {
+            let by = spot.top() - view.top() - view.size.height * LANDING;
+            let here = self.scrollbar.read(cx).offset();
+            self.back = Some((here, from.to_string()));
+            self.scrollbar.update(cx, |bar, cx| bar.glide_by(by, window, cx));
+        }
+        self.light(cid);
+        cx.notify();
+    }
+
+    fn light(&mut self, cid: &str) {
         self.lights += 1;
         self.lit = Some((cid.to_string(), self.lights));
-        cx.notify();
+    }
+
+    /// Sonora's lyrics "follow again": once a quote has led away, a perched button glides
+    /// back to the reply that quoted. It stays away while the view is still near there.
+    fn way_back(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let (to, _) = self.back.as_ref()?;
+        let reach = px(self.viewport_h / 4.);
+        if (self.scrollbar.read(cx).offset() - *to).abs() < reach {
+            return None;
+        }
+        Some(perched(
+            Button::new("quote-back").icon("icons/undo-2.svg").on_click(cx.listener(|this, _, window, cx| {
+                let Some((to, from)) = this.back.take() else { return };
+                let by = to - this.scrollbar.read(cx).offset();
+                this.scrollbar.update(cx, |bar, cx| bar.glide_by(by, window, cx));
+                this.light(&from);
+                cx.notify();
+            })),
+            cx,
+        ))
     }
 
     /// The line under a thread: "Ответы: N" opens it (resting on it or pressing it fetches
@@ -1240,7 +1281,8 @@ impl Render for CommentsView {
                         )
                         .size_full(),
                     )
-                    .child(self.scrollbar.clone()),
+                    .child(self.scrollbar.clone())
+                    .children(self.way_back(cx)),
             )
     }
 }

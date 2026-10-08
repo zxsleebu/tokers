@@ -717,3 +717,23 @@ pub fn menu_item(id: impl Into<ElementId>, label: impl Into<SharedString>, selec
         .when(selected, |this| this.child(div().flex_none().child("✓")))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
+
+/// How far above the bottom of its region a perched control floats.
+const PERCH: Pixels = px(12.);
+
+/// Sonora's perched control: a round glass button floating at the bottom centre of a
+/// scrolling region (a trip back, say). The parent has to be `relative`.
+pub fn perched(button: Button, cx: &App) -> Div {
+    let theme = cx.theme();
+    div().absolute().bottom(PERCH).w_full().flex().justify_center().child(
+        div().flex().flex_none().block_mouse_except_scroll().child(
+            button
+                .small()
+                .rounded_full()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.popover.opacity(GLASS_FILL))
+                .backdrop_blur(GLASS_BLUR),
+        ),
+    )
+}

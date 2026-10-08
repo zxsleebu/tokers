@@ -99,6 +99,11 @@ impl Scrollbar {
         bar
     }
 
+    /// How far down the content is, in pixels.
+    pub fn offset(&self) -> Pixels {
+        self.target.offset()
+    }
+
     /// Glides the content `by` up (negative: down), as a wheel would, to bring a spot into view.
     pub fn glide_by(&mut self, by: Pixels, window: &mut Window, cx: &mut Context<Self>) {
         let by = point(Pixels::ZERO, -by);
