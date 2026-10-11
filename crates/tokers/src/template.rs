@@ -160,6 +160,16 @@ impl RequestTemplate {
             params.set("device_id", device_id);
             params.set("iid", iid);
         }
+        // session_id = DID + session start as YYYYMMDDHHMMSS (UTC). The template's
+        // embeds the capture DID + Oct-2 timestamp; rebuild from the sent identity.
+        if params.get("session_id").is_some() {
+            if let Some((device_id, _)) = identity.ids() {
+                params.set("session_id", format!("{device_id}{}", session_stamp(now_ms)));
+            } else if let Some(did) = params.get("device_id") {
+                let did = did.to_string();
+                params.set("session_id", format!("{did}{}", session_stamp(now_ms)));
+            }
+        }
         let mut headers: Vec<(String, String)> = self
             .headers
             .iter()
@@ -171,6 +181,12 @@ impl RequestTemplate {
         match headers.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case("x-ss-req-ticket")) {
             Some(slot) => slot.1 = now_ms.to_string(),
             None => headers.push(("x-ss-req-ticket".into(), now_ms.to_string())),
+        }
+        // The app sends a fresh UUID per request; the template's is Oct-2 frozen.
+        let event_id = uuid_v4();
+        match headers.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case("x-metasec-pns-event-id")) {
+            Some(slot) => slot.1 = event_id,
+            None => headers.push(("x-metasec-pns-event-id".into(), event_id)),
         }
         PreparedRequest {
             origin: self.origin.clone(),
@@ -202,6 +218,48 @@ fn strip_java_list(v: &str) -> String {
     }
 }
 
+/// Random v4 UUID, `8-4-4-4-12` hex. The app mints one per request for
+/// `x-metasec-pns-event-id`.
+fn uuid_v4() -> String {
+    let mut rng = rand::rng();
+    let b: [u8; 16] = rand::Rng::random(&mut rng);
+    let variant = match b[8] & 0xc0 {
+        0x00 => '8',
+        0x40 => '9',
+        0x80 => 'a',
+        _ => 'b',
+    };
+    format!(
+        "{:08x}-{:04x}-4{:03x}-{}{:03x}-{:012x}",
+        u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+        u16::from_be_bytes([b[4], b[5]]),
+        u16::from_be_bytes([b[6], b[7]]) & 0x0fff,
+        variant,
+        u16::from_be_bytes([b[8], b[9]]) & 0x0fff,
+        u64::from_be_bytes([0, 0, b[10], b[11], b[12], b[13], b[14], b[15]]),
+    )
+}
+
+/// Milliseconds-since-epoch to `YYYYMMDDHHMMSS` (UTC, proleptic Gregorian).
+fn session_stamp(now_ms: u64) -> String {
+    let secs = (now_ms / 1000) as i64;
+    let mut days = secs.div_euclid(86_400);
+    let day_secs = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (day_secs / 3600, day_secs % 3600 / 60, day_secs % 60);
+    // days since 1970-01-01 -> civil date (Howard Hinnant's algorithm).
+    days += 719_468;
+    let era = days.div_euclid(146_097);
+    let doe = days.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    y += i64::from(m <= 2);
+    format!("{y:04}{m:02}{d:02}{hh:02}{mm:02}{ss:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,10 +279,14 @@ mod tests {
         );
         assert_eq!(req.khronos(), 1_790_972_388);
         assert_eq!(req.user_agent, "tokers-placeholder");
-        assert_eq!(
-            req.headers,
-            vec![("sdk-version".into(), "2".into()), ("x-ss-req-ticket".into(), "1790972388123".into())]
-        );
+        assert_eq!(req.headers[0], ("sdk-version".into(), "2".into()));
+        assert_eq!(req.headers[1], ("x-ss-req-ticket".into(), "1790972388123".into()));
+        // Fresh v4 UUID per request (8-4-4-4-12).
+        let (k, v) = &req.headers[2];
+        assert_eq!(k, "x-metasec-pns-event-id");
+        assert_eq!(v.len(), 36);
+        assert_eq!(&v[14..15], "4");
+        assert!(matches!(&v[19..20], "8" | "9" | "a" | "b"));
     }
 
     #[test]
@@ -236,5 +298,12 @@ mod tests {
             "aweme_id=777&cursor=50&count=50&device_platform=android&os=android&channel=googleplay\
              &aid=1233&app_name=musical_ly&_rticket=1790972388123&ts=1790972388&iid=2&device_id=1"
         );
+    }
+
+    #[test]
+    fn session_stamp_matches_utc() {
+        // 1790972388 = 2026-10-02 20:19:48 UTC.
+        assert_eq!(session_stamp(1_790_972_388_123), "20261002201948");
+        assert_eq!(session_stamp(0), "19700101000000");
     }
 }
