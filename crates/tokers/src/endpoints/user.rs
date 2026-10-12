@@ -13,7 +13,9 @@ pub struct UserProfileResponse {
     pub user: Option<User>,
 }
 
-/// Public profile. (`/aweme/v1/user/` needs login; this one does not.)
+/// Public profile. Live app shape (47.1.4, measured 2026-10-11):
+/// `GET /tiktok/user/profile/other/v1` on api16-core/api19-va with
+/// `scene_id=201&user_id&from=0&profile_*_exp&sec_user_id` head.
 #[derive(Clone, Debug)]
 pub struct UserProfile {
     pub user: UserRef,
@@ -21,16 +23,31 @@ pub struct UserProfile {
 
 impl Endpoint for UserProfile {
     type Response = UserProfileResponse;
-    const PATH: &'static str = "/aweme/v1/user/profile/other/";
+    const PATH: &'static str = "/tiktok/user/profile/other/v1";
 
     fn params(&self) -> Params {
-        self.user.params()
+        // Live shape: sec_user_id second when known (no user_id at all then).
+        let mut p = Params::new().with("scene_id", 201);
+        if !self.user.sec_user_id.is_empty() {
+            p = p.with("sec_user_id", &self.user.sec_user_id);
+        } else {
+            p = p.with("user_id", &self.user.user_id);
+        }
+        p.with("from", 0)
+            .with("profile_optimize_exp", 4)
+            .with("header_simplify_exp", 8)
+            .with("left_align_exp", 11)
+            .with("profile_bg_in_allow_list", 0)
+            .with("profile_bg_enable_consumption_group", 3)
     }
 }
 
-/// A user's own videos. Exact app request shape (47.1.4): the app puts the sec
-/// uid in `user_id` and sends no `sec_user_id`. Currently rejected server-side
-/// (see the module docs).
+/// A user's own videos. Live app shape (47.1.4, measured 2026-10-12): the head
+/// is source/locate_new_style/before_count/after_count/reverse + shrink,
+/// screen-reader, banner and sov flags, then max_cursor, both known ids
+/// (user_id and sec_user_id — the app sends both when both are known),
+/// count, locate_item_id on the first page, sort_type and
+/// following_experiment_param.
 #[derive(Clone, Debug)]
 pub struct UserPosts {
     pub user: UserRef,
@@ -43,8 +60,7 @@ impl Endpoint for UserPosts {
     const PATH: &'static str = "/aweme/v1/aweme/post/";
 
     fn params(&self) -> Params {
-        let who = if self.user.sec_user_id.is_empty() { &self.user.user_id } else { &self.user.sec_user_id };
-        Params::new()
+        let mut p = Params::new()
             .with("source", 0)
             .with("locate_new_style", "true")
             .with("before_count", 7)
@@ -55,11 +71,17 @@ impl Endpoint for UserPosts {
             .with("screen_reader_enable", "false")
             .with("creator_assistant_banner_enable", 0)
             .with("sov_client_enable", 1)
-            .with("max_cursor", self.max_cursor)
-            .with("user_id", who)
-            .with("count", self.count)
-            .with("sort_type", 0)
-            .with("following_experiment_param", r#"{"enable_profile_button":false}"#)
+            .with("max_cursor", self.max_cursor);
+        if !self.user.user_id.is_empty() {
+            p = p.with("user_id", &self.user.user_id);
+        }
+        if !self.user.sec_user_id.is_empty() {
+            p = p.with("sec_user_id", &self.user.sec_user_id);
+        }
+        p.with("count", self.count).with("sort_type", 0).with(
+            "following_experiment_param",
+            r#"{"enable_profile_button":false}"#,
+        )
     }
 }
 
